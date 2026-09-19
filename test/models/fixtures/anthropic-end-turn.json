@@ -1,0 +1,10 @@
+{
+  "id": "msg_02",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5",
+  "content": [{ "type": "text", "text": "It is 14:02 and your Desktop has 3 files." }],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 40, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1020, "output_tokens": 18 }
+}

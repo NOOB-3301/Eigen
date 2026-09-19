@@ -1,0 +1,8 @@
+{
+  "rate_limited": { "status": 429, "headers": { "retry-after": "2" }, "body": { "error": { "message": "Rate limit reached", "type": "requests", "code": "rate_limit_exceeded" } } },
+  "server": { "status": 503, "body": { "error": { "message": "model is loading" } } },
+  "auth": { "status": 401, "body": { "error": { "message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key" } } },
+  "bad_request": { "status": 400, "body": { "error": { "message": "Invalid value for 'tool_choice'", "type": "invalid_request_error" } } },
+  "overflow": { "status": 400, "body": { "error": { "message": "This model's maximum context length is 8192 tokens.", "type": "invalid_request_error", "code": "context_length_exceeded" } } },
+  "not_found": { "status": 404, "body": { "error": { "message": "model \"llama9\" not found, try pulling it first" } } }
+}

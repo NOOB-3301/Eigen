@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-417",
+  "object": "chat.completion",
+  "created": 1789000000,
+  "model": "gemma4:e4b",
+  "system_fingerprint": "fp_ollama",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          { "id": "call_x1y2z3", "index": 0, "type": "function", "function": { "name": "current_time", "arguments": "{}" } },
+          { "id": "call_a4b5c6", "index": 1, "type": "function", "function": { "name": "shell_exec", "arguments": "{\"command\":\"ls ~/Desktop\"}" } }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": { "prompt_tokens": 412, "completion_tokens": 37, "total_tokens": 449 }
+}

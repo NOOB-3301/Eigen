@@ -1,0 +1,49 @@
+{
+  "defaultModel": "local",
+  "models": {
+    "local": {
+      "provider": "openai-compat",
+      "baseUrl": "http://localhost:11434/v1",
+      "model": "gemma4:e4b",
+      "contextWindow": 28000,
+      "replyReserve": 4096,
+      "maxOutputTokens": 4096,
+      "toolCalling": true,
+      "vision": false,
+      "promptCaching": false
+    },
+    "cloud": {
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "model": "claude-sonnet-5",
+      "contextWindow": 200000,
+      "replyReserve": 16000,
+      "maxOutputTokens": 16000,
+      "dailyTokenCap": 2000000,
+      "toolCalling": true,
+      "vision": true,
+      "promptCaching": true
+    }
+  },
+  "telegram": {
+    "tokenEnv": "TELEGRAM_BOT_TOKEN",
+    "allowedUserIds": [],
+    "pollTimeoutSec": 30,
+    "chunkSize": 4096,
+    "typingRefreshMs": 4000,
+    "sendRatePerSec": 1
+  },
+  "limits": {
+    "maxSteps": 25,
+    "runTokenBudget": 400000,
+    "runTimeoutMs": 600000,
+    "toolTimeoutMs": 60000,
+    "toolOutputMaxChars": 20000,
+    "toolArgRetryMax": 2,
+    "modelRetryMax": 3,
+    "imageTokenEstimate": 1500
+  },
+  "mcpServers": {},
+  "mcp": {}
+}
