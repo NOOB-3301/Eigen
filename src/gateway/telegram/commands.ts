@@ -8,10 +8,20 @@ const HELP = [
   "/status – model, run state, queue, tokens today",
   "/model [name] – list models or switch this session",
   "/reload – re-read SOUL.md and prompts for the next session",
+  "/reload_mcp – reconnect the MCP servers from config.json",
   "/verbose – toggle tool progress notes",
 ].join("\n");
 
 // Commands act on the agent directly and never wait behind a run in the session queue.
+function mcpLine(s: { tools: number; mcpServers: Array<{ name: string; ok: boolean; tools: number; error?: string }> }): string {
+  if (!s.mcpServers.length) return `Tools: ${s.tools} (no MCP servers configured)`;
+  const ok = s.mcpServers.filter((m) => m.ok);
+  const failed = s.mcpServers.filter((m) => !m.ok).map((m) => `${m.name} (${m.error})`);
+  return [`Tools: ${s.tools}`, `MCP: ${ok.length}/${s.mcpServers.length} servers – ${ok.map((m) => `${m.name}:${m.tools}`).join(", ") || "none"}`, failed.length ? `MCP failed: ${failed.join("; ")}` : ""]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function createCommands(agent: Agent, outbox: Outbox): (chatId: number, text: string) => void {
   return (chatId, text) => {
     const [head = "", ...rest] = text.trim().split(/\s+/);
@@ -39,6 +49,7 @@ export function createCommands(agent: Agent, outbox: Outbox): (chatId: number, t
             `State: ${s.running ? "running" : "idle"}, queued: ${s.queueLength}`,
             `Tokens today (${s.model}): ${s.tokensToday}${s.dailyTokenCap ? ` / ${s.dailyTokenCap}` : ""}`,
             `History: ${s.messages} messages, verbose: ${s.verbose ? "on" : "off"}`,
+            mcpLine(s),
           ].join("\n"),
         );
         break;
@@ -58,6 +69,12 @@ export function createCommands(agent: Agent, outbox: Outbox): (chatId: number, t
       }
       case "reload":
         reply(agent.reload().message);
+        break;
+      // Telegram only auto-links [A-Za-z0-9_], so the underscore form is the canonical one.
+      case "reload_mcp":
+      case "reload-mcp":
+        reply("Reconnecting MCP servers…");
+        void agent.reloadMcp().then((r) => reply(r.message));
         break;
       case "verbose":
         reply(`Verbose ${agent.toggleVerbose(sid) ? "on" : "off"}.`);

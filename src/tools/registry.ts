@@ -60,6 +60,19 @@ export class ToolRegistry {
     return this;
   }
 
+  unregister(name: string): boolean {
+    const had = this.#tools.delete(name);
+    if (had) this.#defs = undefined;
+    return had;
+  }
+
+  // Used by /reload-mcp to swap a server's tools without restarting the daemon.
+  unregisterPrefix(prefix: string): number {
+    let n = 0;
+    for (const name of this.names()) if (name.startsWith(prefix) && this.unregister(name)) n++;
+    return n;
+  }
+
   get(name: string): Tool | undefined {
     return this.#tools.get(name);
   }

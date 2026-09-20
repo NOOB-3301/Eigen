@@ -126,6 +126,7 @@ Only one poller may run per bot token. If another instance is polling, eigen log
 | `/status` | Model, provider, running/idle, queue length, tokens used today. |
 | `/model [name]` | No argument: list entries with capability flags. With a name: switch this session. History carries over. |
 | `/reload` | Re-read prompts for the **next** session (use `/new` to apply). A failed reload keeps the old prompts. |
+| `/reload_mcp` | Reconnect the MCP servers from config.json (alias `/reload-mcp`). |
 | `/verbose` | Toggle short progress notes per tool call. |
 
 Commands run immediately and never wait behind a run. If you send text while a run is busy, it queues FIFO.
@@ -139,6 +140,37 @@ Commands run immediately and never wait behind a run. If you send text while a r
 | `read_file`, `http_fetch`, `current_time` | As before. |
 
 Commands run **as you, with full access to your files**. Secrets are removed from the shell's environment: the env vars named in config (API keys, bot token) and any variable whose name contains `TOKEN`, `SECRET`, `API_KEY`/`APIKEY` or `PASSWORD`. Beyond that there is no sandbox or approval step yet, so a prompt-injected model could run anything you can. The `executeTool` hooks stage is where an approval gate goes.
+
+## MCP servers
+
+Declare servers under `mcpServers` in `~/.eigen/config.json`. Their tools are registered as `mcp__<server>__<tool>` and run through the same gateway as the built-ins (timeout, `/stop`, truncation, verbose notes).
+
+```jsonc
+"mcpServers": {
+  "filesystem": {                                  // stdio
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Projects"]
+  },
+  "github": {                                      // stdio with a secret
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_TOKEN" }
+  },
+  "remote": {                                      // HTTP or SSE
+    "url": "https://example.com/mcp",
+    "transport": "http",
+    "headers": { "Authorization": "env:MY_MCP_TOKEN" }
+  }
+},
+"mcp": { "enabled": true, "startupTimeoutMs": 20000 }
+```
+
+- **Secrets stay out of config.json**: any `env`/`headers` value written as `env:NAME` is read from `~/.eigen/.env` at connect time. stdio servers also get eigen's environment with secrets scrubbed.
+- `"enabled": false` skips a server; `"mcp": { "enabled": false }` skips all of them.
+- A server that fails to start is reported and skipped; the daemon still starts. `/status` shows connected servers and tool counts.
+- After editing `mcpServers`, run `/reload_mcp` in Telegram — no restart needed. It closes the old clients, re-reads config.json and reconnects, reporting each server.
+- Tool names are namespaced, sanitized and capped at 64 characters, so two servers can expose the same tool name.
+- Security: MCP tools are ordinary tools here, so anything they can do, the model can trigger. Content they return is untrusted input — a tool that reads mail or web pages can carry prompt injection. The `executeTool` hooks stage is where an approval gate belongs before connecting anything that sends or deletes.
 
 ## Development
 

@@ -73,7 +73,7 @@ export function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       ...overrides,
     },
     mcpServers: {},
-    mcp: {},
+    mcp: { enabled: true, startupTimeoutMs: 20_000 },
   };
 }
 

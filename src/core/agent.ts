@@ -4,9 +4,12 @@ import { DEFAULTS_DIR } from "../config/home.ts";
 import { ModelRegistry } from "../models/registry.ts";
 import type { FetchFn } from "../models/provider.ts";
 import { UsageTracker } from "../models/usage.ts";
+import { loadConfig } from "../config/load.ts";
 import { loadPrompts } from "../prompts/loader.ts";
 import type { PromptPaths, PromptSet } from "../prompts/loader.ts";
 import { ToolRegistry } from "../tools/registry.ts";
+import { McpManager } from "../tools/mcp/client.ts";
+import type { ServerStatus } from "../tools/mcp/client.ts";
 import { currentTime } from "../tools/builtin/current-time.ts";
 import { httpFetch } from "../tools/builtin/http-fetch.ts";
 import { readFileTool } from "../tools/builtin/read-file.ts";
@@ -46,6 +49,8 @@ export type Status = {
   toolCalling: boolean;
   verbose: boolean;
   messages: number;
+  tools: number;
+  mcpServers: ServerStatus[];
 };
 
 export type ModelInfo = { name: string; entry: ModelEntry; isDefault: boolean };
@@ -56,6 +61,7 @@ export class Agent {
   readonly models: ModelRegistry;
   readonly tools: ToolRegistry;
   readonly usage = new UsageTracker();
+  readonly mcp: McpManager;
   #config: Config;
   #paths: PromptPaths;
   #prompts: PromptSet; // what the next new session gets
@@ -64,12 +70,38 @@ export class Agent {
 
   constructor(deps: AgentDeps) {
     this.#config = deps.config;
+    console.log(`Agent initialized with ${Object.keys(deps.config.models).length} models and ${deps.config.mcpServers.length} MCP servers.`);
+    console.log("Config is:", JSON.stringify(deps.config, null, 2));
     this.#paths = { home: deps.home, defaultsDir: deps.defaultsDir ?? DEFAULTS_DIR };
     this.models = deps.models ?? new ModelRegistry(deps.config, deps.fetch);
     this.tools = deps.tools ?? createBuiltinTools();
     this.#prompts = loadPrompts(this.#paths);
+    this.mcp = new McpManager(this.tools, deps.config.mcp, deps.config.limits.toolTimeoutMs);
     const secretEnv = Object.values(deps.config.models).flatMap((e) => (e.apiKeyEnv ? [e.apiKeyEnv] : []));
     configureShellEnv([...secretEnv, deps.config.telegram.tokenEnv]);
+  }
+
+  // Connects the configured MCP servers and registers their tools. Never throws:
+  // a server that fails is reported through status().
+  async startMcp(): Promise<ServerStatus[]> {
+    return this.mcp.connectAll(this.#config.mcpServers);
+  }
+
+  // /reload-mcp: re-read config.json, then reconnect every server.
+  async reloadMcp(): Promise<Result> {
+    let servers = this.#config.mcpServers;
+    try {
+      const fresh = loadConfig(this.#paths.home);
+      this.#config = { ...this.#config, mcpServers: fresh.mcpServers, mcp: fresh.mcp };
+      servers = fresh.mcpServers;
+    } catch (e) {
+      logger.error({ evt: "mcp_reload_config_failed", err: (e as Error).message });
+      return { ok: false, message: `config.json is invalid, keeping the current MCP servers:\n${(e as Error).message}` };
+    }
+    const status = await this.mcp.reload(servers);
+    if (!status.length) return { ok: true, message: "MCP reloaded: no servers configured." };
+    const lines = status.map((s) => (s.ok ? `▸ ${s.name}: ${s.tools} tools (${s.transport})` : `✗ ${s.name}: ${s.error}`));
+    return { ok: status.every((s) => s.ok), message: `MCP reloaded.\n${lines.join("\n")}` };
   }
 
   on(fn: Listener): () => void {
@@ -130,6 +162,8 @@ export class Agent {
       toolCalling: e.toolCalling,
       verbose: s.verbose,
       messages: s.messages.length,
+      tools: this.tools.names().length,
+      mcpServers: this.mcp.status(),
     };
   }
 
@@ -165,8 +199,9 @@ export class Agent {
     return s.verbose;
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const s of this.#sessions.all()) this.#sessions.cancel(s);
     killAll();
+    await this.mcp.close();
   }
 }

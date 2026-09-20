@@ -18,6 +18,8 @@ if (entry) {
     process.exit(1);
   }
 }
+const mcp = await agent.startMcp();
+for (const m of mcp) console.log(m.ok ? `mcp ${m.name}: ${m.tools} tools` : `mcp ${m.name}: FAILED (${m.error})`);
 const s = agent.status(sid);
 console.log(`model: ${s.model} (${s.provider}, ${s.providerModel}). Type a message; /model <name>, /new, Ctrl-C to stop a run, Ctrl-D to quit.`);
 

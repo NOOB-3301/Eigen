@@ -46,5 +46,8 @@
     "imageTokenEstimate": 1500
   },
   "mcpServers": {},
-  "mcp": {}
+  "mcp": {
+    "enabled": true,
+    "startupTimeoutMs": 20000
+  }
 }

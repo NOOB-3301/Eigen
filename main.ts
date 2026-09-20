@@ -43,9 +43,10 @@ if (config.telegram.allowedUserIds.length === 0) {
   console.error(`telegram.allowedUserIds in ${join(home, "config.json")} is empty; nobody could talk to the bot. Add your Telegram user id.`);
   process.exit(1);
 }
-logger.info({ evt: "mcp", servers: Object.keys(config.mcpServers) }, "MCP is not enabled in this version; mcpServers/mcp are validated but ignored");
-
 const agent = new Agent({ config, home });
+// Connect MCP servers before polling starts so the first message already sees their tools.
+const mcpStatus = await agent.startMcp();
+logger.info({ evt: "mcp_ready", servers: mcpStatus.length, connected: mcpStatus.filter((s) => s.ok).length, tools: agent.mcp.toolCount() });
 const telegram = new TelegramChannel(config.telegram, agent);
 
 let stopping = false;
@@ -56,6 +57,7 @@ async function shutdown(signal: string, code = 0): Promise<void> {
   setTimeout(() => process.exit(code), 5000).unref(); // never hang on exit
   agent.shutdown(); // cancels runs; their "Stopped." notes go into the outbox
   await telegram.stop();
+  await agent.mcp.close();
   process.exit(code);
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));

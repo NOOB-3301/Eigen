@@ -44,11 +44,30 @@ export const LimitsSchema = z.object({
   imageTokenEstimate: posInt.default(1500),
 });
 
-// Reserved for the MCP milestone: validated now so config files stay forward-compatible.
-export const McpServerSchema = z.object({
+// Secrets never live in config.json: an env value or header may be written as
+// "env:VAR_NAME" and is resolved from the environment at connect time.
+export const StdioServerSchema = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
   env: z.record(z.string(), z.string()).optional(),
+  cwd: z.string().optional(),
+  enabled: z.boolean().default(true),
+});
+
+export const RemoteServerSchema = z.object({
+  url: z.url(),
+  transport: z.enum(["http", "sse"]).default("http"),
+  headers: z.record(z.string(), z.string()).optional(),
+  enabled: z.boolean().default(true),
+});
+
+export const McpServerSchema = z.union([StdioServerSchema, RemoteServerSchema]);
+
+export const McpSchema = z.object({
+  enabled: z.boolean().default(true),
+  startupTimeoutMs: posInt.default(20_000),
+  // Falls back to limits.toolTimeoutMs when unset.
+  toolTimeoutMs: posInt.optional(),
 });
 
 export const ConfigSchema = z
@@ -58,7 +77,7 @@ export const ConfigSchema = z
     telegram: TelegramSchema,
     limits: LimitsSchema.prefault({}),
     mcpServers: z.record(z.string(), McpServerSchema).default({}),
-    mcp: z.record(z.string(), z.unknown()).default({}),
+    mcp: McpSchema.prefault({}),
   })
   .refine((c) => c.defaultModel in c.models, {
     message: "defaultModel must name an entry in models",
@@ -70,3 +89,7 @@ export type ModelEntry = z.infer<typeof ModelEntrySchema>;
 export type Limits = z.infer<typeof LimitsSchema>;
 export type TelegramConfig = z.infer<typeof TelegramSchema>;
 export type ProviderKind = ModelEntry["provider"];
+export type McpServer = z.infer<typeof McpServerSchema>;
+export type McpServers = Config["mcpServers"];
+export type McpOptions = z.infer<typeof McpSchema>;
+export const isRemoteServer = (s: McpServer): s is z.infer<typeof RemoteServerSchema> => "url" in s;
