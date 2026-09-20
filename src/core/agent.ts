@@ -11,6 +11,8 @@ import { currentTime } from "../tools/builtin/current-time.ts";
 import { httpFetch } from "../tools/builtin/http-fetch.ts";
 import { readFileTool } from "../tools/builtin/read-file.ts";
 import { shellExec } from "../tools/builtin/shell.ts";
+import { runCode } from "../tools/builtin/run-code.ts";
+import { configureShellEnv, killAll, resetSession } from "../tools/builtin/shell-session.ts";
 import { EventBus } from "./events.ts";
 import type { Listener } from "./events.ts";
 import { runLoop } from "./loop.ts";
@@ -19,7 +21,7 @@ import type { Session } from "./session.ts";
 import { logger } from "../util/logger.ts";
 
 export function createBuiltinTools(): ToolRegistry {
-  return new ToolRegistry().register(shellExec).register(readFileTool).register(httpFetch).register(currentTime);
+  return new ToolRegistry().register(shellExec).register(runCode).register(readFileTool).register(httpFetch).register(currentTime);
 }
 
 export type AgentDeps = {
@@ -66,6 +68,8 @@ export class Agent {
     this.models = deps.models ?? new ModelRegistry(deps.config, deps.fetch);
     this.tools = deps.tools ?? createBuiltinTools();
     this.#prompts = loadPrompts(this.#paths);
+    const secretEnv = Object.values(deps.config.models).flatMap((e) => (e.apiKeyEnv ? [e.apiKeyEnv] : []));
+    configureShellEnv([...secretEnv, deps.config.telegram.tokenEnv]);
   }
 
   on(fn: Listener): () => void {
@@ -106,6 +110,7 @@ export class Agent {
   newSession(sessionId: string): Result {
     const old = this.#sessions.get(sessionId);
     if (old) this.#sessions.cancel(old);
+    resetSession(sessionId); // fresh session, fresh shell
     const r = this.reload();
     this.#sessions.create({ id: sessionId, model: old?.model ?? this.models.defaultName, verbose: old?.verbose, prompts: this.#prompts });
     return { ok: r.ok, message: r.ok ? `New session started.${this.#prompts.notes.length ? `\n${this.#prompts.notes.join("\n")}` : ""}` : `New session started. ${r.message}` };
@@ -162,5 +167,6 @@ export class Agent {
 
   shutdown(): void {
     for (const s of this.#sessions.all()) this.#sessions.cancel(s);
+    killAll();
   }
 }

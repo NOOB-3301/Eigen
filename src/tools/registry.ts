@@ -4,11 +4,19 @@ import type { Part, ToolDef } from "../core/types.ts";
 export type ToolContext = { signal: AbortSignal; sessionId: string };
 export type ToolOutput = string | { content: Part[]; isError?: boolean };
 
+// MCP servers describe their tools with JSON Schema, not zod. Such a tool validates
+// its own input, so eigen passes the arguments through untouched.
+export type RawSchema = { jsonSchema: Record<string, unknown> };
+export const isRawSchema = (s: unknown): s is RawSchema => typeof s === "object" && s !== null && "jsonSchema" in s;
+
 export type Tool<S extends z.ZodType = z.ZodType> = {
   name: string;
   description: string;
-  inputSchema: S;
+  inputSchema: S | RawSchema;
   execute(input: z.infer<S>, ctx: ToolContext): Promise<ToolOutput>;
+  // Lets a tool ask for a longer (or shorter) limit based on its validated input; the
+  // gateway clamps it to limits.toolMaxTimeoutMs.
+  timeoutMs?(input: z.infer<S>): number | undefined;
 };
 
 // Erases the schema generic so tools with different inputs share one registry.
@@ -16,7 +24,13 @@ export function defineTool<S extends z.ZodType>(t: Tool<S>): Tool {
   return t as unknown as Tool;
 }
 
-function jsonSchema(schema: z.ZodType): Record<string, unknown> {
+// For tools whose schema arrives at runtime (MCP): input reaches execute unvalidated.
+export function defineRawTool(t: { name: string; description: string; inputSchema: RawSchema; execute: (input: never, ctx: ToolContext) => Promise<ToolOutput>; timeoutMs?: (input: never) => number | undefined }): Tool {
+  return t as unknown as Tool;
+}
+
+function jsonSchema(schema: z.ZodType | RawSchema): Record<string, unknown> {
+  if (isRawSchema(schema)) return schema.jsonSchema;
   const { $schema: _, ...rest } = z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown>;
   return rest;
 }

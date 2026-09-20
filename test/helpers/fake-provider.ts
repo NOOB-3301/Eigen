@@ -65,6 +65,7 @@ export function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       runTokenBudget: 1_000_000,
       runTimeoutMs: 60_000,
       toolTimeoutMs: 5_000,
+      toolMaxTimeoutMs: 60_000,
       toolOutputMaxChars: 10_000,
       toolArgRetryMax: 2,
       modelRetryMax: 0,

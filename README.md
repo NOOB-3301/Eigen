@@ -10,6 +10,8 @@ v0 is the skeleton: config, in-memory sessions, prompt assembly from `SOUL.md` +
 - A Telegram account.
 - Ollama for local models, and/or an Anthropic API key.
 
+Dependencies: `grammy`, `zod`, `pino`, and the Vercel AI SDK (`ai`, `@ai-sdk/anthropic`, `@ai-sdk/openai-compatible`). Adding another provider is one SDK package plus one config entry.
+
 ```sh
 npm install
 node main.ts        # first run creates ~/.eigen and tells you what to fill in
@@ -102,6 +104,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 - `openai-compat` works with anything that speaks chat completions: Ollama, OpenAI, OpenRouter, LM Studio, and so on. For hosted APIs, set `apiKeyEnv`.
+- `baseUrl` is the API root; the SDK appends the endpoint (`/chat/completions`, `/messages`).
 - Model IDs are config only. Nothing in the code hard-codes one.
 - `mcpServers` / `mcp` are validated but not used yet.
 
@@ -127,6 +130,16 @@ Only one poller may run per bot token. If another instance is polling, eigen log
 
 Commands run immediately and never wait behind a run. If you send text while a run is busy, it queues FIFO.
 
+## Execution tools
+
+| Tool | What it does |
+|---|---|
+| `shell_exec` | Persistent bash per chat session: `cd`, `export`, activated venvs carry over between calls. Starts in `~`. Non-interactive (stdin closed), so `sudo` password prompts and `[y/N]` questions fail fast instead of hanging. Optional `timeoutSec` for slow commands (capped by `limits.toolMaxTimeoutMs`, default 15 min). A timeout or `/stop` kills the shell and its children; the next call gets a fresh shell and is told so. `/new` also resets it. |
+| `run_code` | Runs `python` / `javascript` / `typescript` / `bash`, either a `code` snippet (saved to `~/.eigen/workspace/snippets/` so you can inspect or re-run it) or an existing `path`, with `args`. Runs inside the session shell, so it uses that shell's cwd and virtualenv. |
+| `read_file`, `http_fetch`, `current_time` | As before. |
+
+Commands run **as you, with full access to your files**. Secrets are removed from the shell's environment: the env vars named in config (API keys, bot token) and any variable whose name contains `TOKEN`, `SECRET`, `API_KEY`/`APIKEY` or `PASSWORD`. Beyond that there is no sandbox or approval step yet, so a prompt-injected model could run anything you can. The `executeTool` hooks stage is where an approval gate goes.
+
 ## Development
 
 ```sh
@@ -142,7 +155,7 @@ src/config    home dir bootstrap, zod schema, loading
 src/core      agent API, loop, sessions/queue, context assembly, trimming, events, types
 src/prompts   SOUL.md / system.md loading with fallback
 src/models    provider interface, error normalization + the single retry wrapper,
-              registry, daily usage, adapters/{openai-compat,anthropic}.ts
+              registry, daily usage, adapters/ai-sdk.ts (Vercel AI SDK)
 src/tools     registry, gateway (executeTool pipeline), builtin tools, mcp/ (stub)
 src/gateway   channel interface, telegram/ (receiver, fastpath, commands, dispatcher, outbox, format)
 src/util      logger, token estimate, backoff, abort helpers
@@ -152,9 +165,11 @@ Dependency rule: `gateway -> core -> {models, tools, prompts, config, util}`. `m
 
 ## Design notes
 
-- **Provider-neutral history.** Messages are stored as `{ role, parts, providerData? }`. The adapters translate them at send time. That's why `/model` can switch between Ollama and Anthropic mid-conversation.
-- **Tool-call IDs are minted by eigen.** The Anthropic adapter keeps the original assistant content blocks, including thinking blocks, in `providerData` and replays them byte-for-byte within a tool loop. It also maps eigen IDs back to `toolu_...` IDs. Switching to a different provider drops `providerData`.
-- **Prompt caching (Anthropic).** Up to three `cache_control` markers: on the last tool, the system block, and the last message block. The last marker gives a rolling cache of the conversation. The system prompt contains nothing volatile; time comes from the `current_time` tool. Prefixes below the model's cache minimum (1024 tokens on Sonnet 5) silently won't cache.
+- **Provider-neutral history.** Messages are stored as `{ role, parts, providerData? }`. The adapter translates them at send time. That's why `/model` can switch between Ollama and Anthropic mid-conversation.
+- **The model layer is the Vercel AI SDK; the loop is eigen's.** `src/models/adapters/ai-sdk.ts` calls `generateText` once per step with tools declared **without** an `execute` function, which makes the SDK return tool calls instead of running them (the SDK's "manual agent loop"). Every tool then runs through eigen's own gateway, so timeouts, `/stop`, output truncation, events and the hooks stage still apply. `maxRetries: 0` keeps eigen's `withRetry` the single retry place.
+- **Seeing the wire.** Since the SDK builds the request body, run with `EIGEN_LOG_LEVEL=debug` to log every outgoing request (`evt: "model_request"`).
+- **Tool-call IDs come from the provider/SDK** and round-trip through `providerData`, which holds the SDK's own assistant messages (Anthropic thinking blocks and their signatures included) and replays them unchanged inside a tool loop. Switching provider drops `providerData`; an ID minted by one provider may still travel with the history, which is harmless because both APIs treat IDs as opaque strings.
+- **Prompt caching (Anthropic).** `cache_control` markers on the last tool definition and the last message (a rolling cache of the conversation), applied only when the entry sets `promptCaching`. The system prompt contains nothing volatile; time comes from the `current_time` tool. Prefixes below the model's cache minimum (1024 tokens on Sonnet 5) silently won't cache.
 - **Trimming.** Trimming works on a copy of history. It first blanks old tool-result bodies, then drops whole old turns. It never separates a tool call from its result and never touches the latest turn. After an edit, `providerData` is dropped from completed turns, because signed thinking blocks are bound to the exact earlier transcript.
 - **Model calls are logged** one JSON line each, with provider, model, session, step, estimated vs reported prompt tokens, completion and cached tokens, latency, and stop reason.
 

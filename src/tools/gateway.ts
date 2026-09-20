@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Part, ToolCall } from "../core/types.ts";
+import { isRawSchema } from "./registry.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { isAbortError, whenAborted } from "../util/abort.ts";
 
@@ -11,9 +12,17 @@ export type ExecContext = {
   registry: ToolRegistry;
   signal: AbortSignal;
   sessionId: string;
-  timeoutMs: number;
+  timeoutMs: number; // default when the tool doesn't ask for its own
+  maxTimeoutMs?: number; // cap for tool-requested timeouts
   maxOutputChars: number;
 };
+
+const MIN_REQUESTED_TIMEOUT_MS = 1_000;
+
+function effectiveTimeout(requested: number | undefined, ctx: ExecContext): number {
+  if (requested === undefined) return ctx.timeoutMs;
+  return Math.min(Math.max(requested, MIN_REQUESTED_TIMEOUT_MS), ctx.maxTimeoutMs ?? ctx.timeoutMs);
+}
 
 // Seam for later policy/approval/audit hooks. Intentionally empty in v0.
 export type ToolHook = (call: ToolCall, input: unknown, ctx: ExecContext) => Promise<void>;
@@ -45,6 +54,8 @@ function validate(call: ToolCall, ctx: ExecContext): Stage {
     return { ok: false, kind: "unknown_tool", message: `Unknown tool "${call.name}". Valid tools: ${near.join(", ")}${near.length < ctx.registry.names().length ? " (closest matches)" : ""}.` };
   }
   if (call.argsError) return { ok: false, kind: "invalid_args", message: `Invalid arguments for ${call.name}: ${call.argsError}` };
+  // A raw JSON Schema tool (e.g. from MCP) validates its own input server-side.
+  if (isRawSchema(tool.inputSchema)) return { ok: true, input: call.args };
   const parsed = tool.inputSchema.safeParse(call.args);
   if (!parsed.success) return { ok: false, kind: "invalid_args", message: `Invalid arguments for ${call.name}:\n${z.prettifyError(parsed.error)}` };
   return { ok: true, input: parsed.data };
@@ -66,17 +77,18 @@ export async function executeTool(call: ToolCall, ctx: ExecContext): Promise<Too
 
   for (const hook of hooks) await hook(call, v.input, ctx);
 
-  const timeout = AbortSignal.timeout(ctx.timeoutMs);
+  const tool = ctx.registry.get(call.name)!;
+  const timeoutMs = effectiveTimeout(tool.timeoutMs?.(v.input), ctx);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([ctx.signal, timeout]);
   try {
-    const tool = ctx.registry.get(call.name)!;
     // Race so a tool that ignores its signal still can't hold the run hostage.
     const out = await Promise.race([tool.execute(v.input, { signal, sessionId: ctx.sessionId }), whenAborted(signal)]);
     if (typeof out === "string") return done("ok", text(out || "(no output)"), false);
     return done(out.isError ? "tool_error" : "ok", out.content.length ? out.content : text("(no output)"), !!out.isError);
   } catch (e) {
     if (ctx.signal.aborted) return done("aborted", text("Cancelled by user."), true);
-    if (timeout.aborted) return done("timeout", text(`Tool timed out after ${ctx.timeoutMs} ms.`), true);
+    if (timeout.aborted) return done("timeout", text(`Tool timed out after ${timeoutMs} ms.`), true);
     const msg = isAbortError(e) ? "aborted" : (e as Error)?.message ?? String(e);
     return done("tool_error", text(`Tool failed: ${msg}`), true);
   }

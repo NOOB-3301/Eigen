@@ -1,45 +1,19 @@
-import { spawn } from "node:child_process";
 import { z } from "zod";
 import { defineTool } from "../registry.ts";
-import { expandHome } from "../../config/home.ts";
-
-const MAX_CAPTURE = 1_000_000;
+import { formatResult, run } from "./shell-session.ts";
 
 export const shellExec = defineTool({
   name: "shell_exec",
-  description: "Run a shell command with /bin/sh on the host Mac. Returns exit code, stdout and stderr.",
+  description:
+    "Run a command in your persistent bash shell on the host Mac. cd, exported variables and activated virtualenvs persist between calls; the shell starts in the home directory. " +
+    "Commands run non-interactively with stdin closed: anything that prompts (sudo password, [y/N]) fails, so pass flags like -y / --yes or NONINTERACTIVE=1. " +
+    "Returns the exit code and combined stdout+stderr. For slow commands such as package installs, set timeoutSec (up to 900). A timeout or cancel kills the shell and resets its state.",
   inputSchema: z.object({
-    command: z.string().min(1).describe("Shell command to run"),
-    cwd: z.string().optional().describe("Working directory; ~ is expanded. Defaults to the home directory."),
+    command: z.string().min(1).describe("Bash command line"),
+    timeoutSec: z.number().int().positive().optional().describe("Raise for slow commands, e.g. 600 for brew install. Default is short."),
   }),
-  execute({ command, cwd }, { signal }) {
-    return new Promise((resolve, reject) => {
-      // detached => own process group, so cancel kills the whole pipeline, not just sh.
-      const child = spawn("/bin/sh", ["-c", command], {
-        cwd: expandHome(cwd ?? "~"),
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout.on("data", (d: Buffer) => { if (stdout.length < MAX_CAPTURE) stdout += d; });
-      child.stderr.on("data", (d: Buffer) => { if (stderr.length < MAX_CAPTURE) stderr += d; });
-      const kill = () => {
-        try {
-          process.kill(-child.pid!, "SIGKILL");
-        } catch {}
-      };
-      signal.addEventListener("abort", kill, { once: true });
-      child.on("error", (e) => {
-        signal.removeEventListener("abort", kill);
-        reject(e);
-      });
-      child.on("close", (code, sig) => {
-        signal.removeEventListener("abort", kill);
-        const status = code === null ? `killed by ${sig}` : `exit code ${code}`;
-        const body = `${status}\n--- stdout ---\n${stdout || "(empty)"}\n--- stderr ---\n${stderr || "(empty)"}`;
-        resolve({ content: [{ type: "text", text: body }], isError: code !== 0 });
-      });
-    });
+  timeoutMs: ({ timeoutSec }) => (timeoutSec ? timeoutSec * 1000 : undefined),
+  async execute({ command }, { sessionId, signal }) {
+    return formatResult(await run(sessionId, command, signal));
   },
 });

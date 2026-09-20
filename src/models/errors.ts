@@ -39,11 +39,6 @@ export function classifyHttp(status: number, message: string, retryAfter?: strin
   return new ModelError("bad_request", msg, opts);
 }
 
-export function classifyNetworkError(e: unknown): ModelError {
-  const cause = (e as { cause?: { code?: string } })?.cause?.code;
-  return new ModelError("transient", `network error: ${(e as Error)?.message ?? e}${cause ? ` (${cause})` : ""}`);
-}
-
 export function isRetryable(e: unknown): e is ModelError {
   return e instanceof ModelError && (e.kind === "transient" || e.kind === "rate_limited");
 }

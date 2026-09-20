@@ -33,8 +33,11 @@ export const TelegramSchema = z.object({
 export const LimitsSchema = z.object({
   maxSteps: posInt.default(25),
   runTokenBudget: posInt.default(400_000),
-  runTimeoutMs: posInt.default(10 * 60_000),
+  // Must outlive the longest single tool call (see toolMaxTimeoutMs).
+  runTimeoutMs: posInt.default(30 * 60_000),
   toolTimeoutMs: posInt.default(60_000),
+  // Upper bound for a tool that asks for more time (e.g. shell_exec timeoutSec for installs).
+  toolMaxTimeoutMs: posInt.default(15 * 60_000),
   toolOutputMaxChars: posInt.default(20_000),
   toolArgRetryMax: z.number().int().min(0).default(2),
   modelRetryMax: z.number().int().min(0).default(3),

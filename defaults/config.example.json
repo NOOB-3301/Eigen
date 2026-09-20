@@ -37,8 +37,9 @@
   "limits": {
     "maxSteps": 25,
     "runTokenBudget": 400000,
-    "runTimeoutMs": 600000,
+    "runTimeoutMs": 1800000,
     "toolTimeoutMs": 60000,
+    "toolMaxTimeoutMs": 900000,
     "toolOutputMaxChars": 20000,
     "toolArgRetryMax": 2,
     "modelRetryMax": 3,

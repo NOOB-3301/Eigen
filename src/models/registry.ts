@@ -1,12 +1,12 @@
 import type { Config, ModelEntry, ProviderKind } from "../config/schema.ts";
-import { createAnthropicProvider } from "./adapters/anthropic.ts";
-import { createOpenAICompatProvider } from "./adapters/openai-compat.ts";
+import { createAiSdkProvider } from "./adapters/ai-sdk.ts";
 import type { FetchFn, ModelProvider } from "./provider.ts";
 
-// Adding a provider = one adapter + one line here + a config entry.
+// Both kinds go through the one AI SDK adapter, which picks the SDK provider from
+// entry.provider. Adding a provider = one SDK package + one line here + a config entry.
 const FACTORIES: Record<ProviderKind, (f?: FetchFn) => ModelProvider> = {
-  "openai-compat": createOpenAICompatProvider,
-  anthropic: createAnthropicProvider,
+  "openai-compat": createAiSdkProvider,
+  anthropic: createAiSdkProvider,
 };
 
 export class ModelRegistry {

@@ -1,65 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { createAnthropicProvider } from "../../src/models/adapters/anthropic.ts";
-import { createOpenAICompatProvider } from "../../src/models/adapters/openai-compat.ts";
-import { ModelError, parseRetryAfter, withRetry } from "../../src/models/errors.ts";
+import { classifyHttp, ModelError, parseRetryAfter, withRetry } from "../../src/models/errors.ts";
 import type { ErrorKind } from "../../src/models/errors.ts";
-import type { ModelEntry } from "../../src/config/schema.ts";
-import { fixture, mockFetch } from "../helpers/mock-fetch.ts";
 
 const signal = new AbortController().signal;
-const ant: ModelEntry = { provider: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKeyEnv: "TEST_ANT_KEY2", model: "m", contextWindow: 1000, replyReserve: 100, maxOutputTokens: 100, toolCalling: true, vision: false, promptCaching: false };
-const oa: ModelEntry = { ...ant, provider: "openai-compat", apiKeyEnv: undefined };
-process.env.TEST_ANT_KEY2 = "k";
 
-async function kindOf(provider: ReturnType<typeof createAnthropicProvider>, entry: ModelEntry): Promise<ModelError> {
-  try {
-    await provider.chat({ system: "s", messages: [{ role: "user", parts: [{ type: "text", text: "x" }] }], tools: [], signal, entry });
-  } catch (e) {
-    return e as ModelError;
-  }
-  throw new Error("expected failure");
-}
-
-describe("error normalization", () => {
-  const antCases: Record<string, ErrorKind> = { rate_limited: "rate_limited", overloaded: "transient", server: "transient", auth: "auth", permission: "auth", bad_request: "bad_request", overflow: "context_overflow", too_large: "context_overflow" };
-  for (const [name, kind] of Object.entries(antCases)) {
-    it(`anthropic ${name} -> ${kind}`, async () => {
-      const f = fixture("anthropic-errors.json")[name];
-      const { fn } = mockFetch([{ status: f.status, body: f.body, headers: f.headers }]);
-      const e = await kindOf(createAnthropicProvider(fn), ant);
-      expect(e).toBeInstanceOf(ModelError);
-      expect(e.kind).toBe(kind);
-      if (name === "rate_limited") expect(e.retryAfterMs).toBe(7000);
+describe("classifyHttp", () => {
+  const cases: Array<[number, string, ErrorKind]> = [
+    [401, "invalid x-api-key", "auth"],
+    [403, "not allowed", "auth"],
+    [429, "rate limit reached", "rate_limited"],
+    [500, "internal", "transient"],
+    [529, "overloaded", "transient"],
+    [408, "timeout", "transient"],
+    [400, "prompt is too long: 210000 tokens > 200000 maximum", "context_overflow"],
+    [400, "This model's maximum context length is 8192 tokens.", "context_overflow"],
+    [413, "request too large", "context_overflow"],
+    [400, "tool_use ids must be unique", "bad_request"],
+    [404, "model not found", "bad_request"],
+  ];
+  for (const [status, message, kind] of cases) {
+    it(`${status} "${message.slice(0, 30)}" -> ${kind}`, () => {
+      expect(classifyHttp(status, message).kind).toBe(kind);
     });
   }
 
-  const oaCases: Record<string, ErrorKind> = { rate_limited: "rate_limited", server: "transient", auth: "auth", bad_request: "bad_request", overflow: "context_overflow", not_found: "bad_request" };
-  for (const [name, kind] of Object.entries(oaCases)) {
-    it(`openai-compat ${name} -> ${kind}`, async () => {
-      const f = fixture("openai-errors.json")[name];
-      const { fn } = mockFetch([{ status: f.status, body: f.body, headers: f.headers }]);
-      expect((await kindOf(createOpenAICompatProvider(fn), oa)).kind).toBe(kind);
-    });
-  }
-
-  it("network failures are transient", async () => {
-    const fn = async () => {
-      throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
-    };
-    const e = await kindOf(createOpenAICompatProvider(fn as never), oa);
-    expect(e.kind).toBe("transient");
-    expect(e.message).toContain("ECONNREFUSED");
+  it("carries Retry-After through", () => {
+    expect(classifyHttp(429, "slow down", "7").retryAfterMs).toBe(7000);
   });
+});
 
-  it("parses Retry-After seconds and dates", () => {
+describe("parseRetryAfter", () => {
+  it("accepts seconds and HTTP dates, ignores nothing", () => {
     expect(parseRetryAfter("3")).toBe(3000);
     expect(parseRetryAfter(new Date(Date.now() + 5000).toUTCString())).toBeGreaterThan(3000);
     expect(parseRetryAfter(null)).toBeUndefined();
+    expect(parseRetryAfter("not-a-date")).toBeUndefined();
   });
 });
 
 describe("withRetry", () => {
-  const run = async (kinds: ErrorKind[]) => {
+  const run = async (kinds: ErrorKind[], maxRetries = 3) => {
     let n = 0;
     try {
       await withRetry(
@@ -68,7 +48,7 @@ describe("withRetry", () => {
           if (k) throw new ModelError(k, k, { retryAfterMs: 1 });
           return "ok";
         },
-        { signal, maxRetries: 3 },
+        { signal, maxRetries },
       );
       return { ok: true, attempts: n };
     } catch (e) {
@@ -76,13 +56,29 @@ describe("withRetry", () => {
     }
   };
 
-  it("retries transient and rate_limited, honoring retry-after", async () => {
+  it("retries transient and rate_limited", async () => {
     expect(await run(["transient", "rate_limited"])).toEqual({ ok: true, attempts: 3 });
   });
   it("never retries auth, bad_request or context_overflow", async () => {
     for (const k of ["auth", "bad_request", "context_overflow"] as const) expect(await run([k])).toEqual({ ok: false, attempts: 1, kind: k });
   });
   it("gives up after maxRetries", async () => {
-    expect(await run(["transient", "transient", "transient", "transient", "transient"])).toEqual({ ok: false, attempts: 4, kind: "transient" });
+    expect(await run(Array(6).fill("transient"))).toEqual({ ok: false, attempts: 4, kind: "transient" });
+  });
+  it("does not retry when maxRetries is 0", async () => {
+    expect(await run(["transient"], 0)).toEqual({ ok: false, attempts: 1, kind: "transient" });
+  });
+  it("rethrows abort errors without retrying", async () => {
+    let n = 0;
+    await expect(
+      withRetry(
+        async () => {
+          n++;
+          throw new DOMException("aborted", "AbortError");
+        },
+        { signal, maxRetries: 3 },
+      ),
+    ).rejects.toThrow("aborted");
+    expect(n).toBe(1);
   });
 });

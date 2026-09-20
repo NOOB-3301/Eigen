@@ -197,6 +197,7 @@ async function runTools(calls: ToolCall[], signal: AbortSignal, { session, runId
       signal,
       sessionId: session.id,
       timeoutMs: deps.limits.toolTimeoutMs,
+      maxTimeoutMs: deps.limits.toolMaxTimeoutMs,
       maxOutputChars: deps.limits.toolOutputMaxChars,
     });
     deps.emit({ type: "tool_end", sessionId: session.id, runId, callId: call.id, name: call.name, ok: !r.isError, durationMs: r.durationMs });
