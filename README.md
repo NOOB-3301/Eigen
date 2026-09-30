@@ -1,8 +1,7 @@
-# eigen
+# _EIGEN_
 
-A personal, always-on agent that runs in the foreground on your Mac and talks to you only through Telegram. Models are provider-agnostic (local Ollama, any OpenAI-compatible API, Anthropic's native API) and switchable per session at runtime.
+My Own Harness , self extensible skill set from clawhub, self u[dating working memory, fulls hell access , and telegram inetegration
 
-v0 is the skeleton: config, in-memory sessions, prompt assembly from `SOUL.md` + prompt files, the agent loop, a tool gateway with four built-in tools, two model adapters, and the Telegram gateway. No database: history lives in memory and is gone on restart.
 
 ## Requirements
 
