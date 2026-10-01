@@ -1,8 +1,0 @@
-{
-  "id": "chatcmpl-419",
-  "object": "chat.completion",
-  "created": 1789000002,
-  "model": "gemma4:e4b",
-  "choices": [{ "index": 0, "message": { "role": "assistant", "content": "It is 14:02." }, "finish_reason": "stop" }],
-  "usage": { "prompt_tokens": 480, "completion_tokens": 6, "total_tokens": 486, "prompt_tokens_details": { "cached_tokens": 400 } }
-}

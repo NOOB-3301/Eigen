@@ -2,84 +2,34 @@
   "defaultModel": "local",
   "models": {
     "local": {
-      "provider": "openai-compat",
-      "baseUrl": "http://localhost:11434/v1",
-      "model": "gemma4:e4b",
+      "id": "ollama/gemma4:e4b",
+      "url": "http://localhost:11434/v1",
       "contextWindow": 28000,
-      "replyReserve": 4096,
-      "maxOutputTokens": 4096,
-      "toolCalling": true,
-      "vision": false,
-      "promptCaching": false
+      "replyReserve": 4096
     },
     "cloud": {
-      "provider": "anthropic",
-      "baseUrl": "https://api.anthropic.com/v1",
-      "apiKeyEnv": "ANTHROPIC_API_KEY",
-      "model": "claude-sonnet-5",
-      "contextWindow": 200000,
-      "replyReserve": 16000,
-      "maxOutputTokens": 16000,
-      "dailyTokenCap": 2000000,
-      "toolCalling": true,
-      "vision": true,
-      "promptCaching": true
+      "id": "anthropic/claude-sonnet-5-5"
     }
   },
+  "curatorModel": "cloud",
   "telegram": {
     "tokenEnv": "TELEGRAM_BOT_TOKEN",
-    "allowedUserIds": [],
-    "pollTimeoutSec": 30,
-    "chunkSize": 4096,
-    "typingRefreshMs": 4000,
-    "sendRatePerSec": 1
+    "allowedUserIds": []
   },
-  "limits": {
-    "maxSteps": 25,
-    "runTokenBudget": 400000,
-    "runTimeoutMs": 1800000,
-    "toolTimeoutMs": 60000,
-    "toolMaxTimeoutMs": 900000,
-    "toolOutputMaxChars": 20000,
-    "toolArgRetryMax": 2,
-    "modelRetryMax": 3,
-    "imageTokenEstimate": 1500
+  "limits": { "maxSteps": 25 },
+  "sandbox": {
+    "isolation": "auto",
+    "allowNetwork": true,
+    "readWritePaths": [],
+    "readOnlyPaths": [],
+    "commandTimeoutMs": 120000
+  },
+  "memory": {
+    "lastMessages": 20,
+    "semanticRecall": { "enabled": true, "topK": 4, "messageRange": 2 },
+    "embedder": { "id": "ollama/nomic-embed-text", "url": "http://localhost:11434/v1" },
+    "consolidationCron": "30 3 * * *"
   },
   "mcpServers": {},
-  "mcp": {
-    "enabled": true,
-    "startupTimeoutMs": 20000
-  },
-  "skills": {
-    "enabled": true,
-    "watch": true,
-    "maxSkills": 64,
-    "indexMaxTokens": 800,
-    "allowCustomEdits": false,
-    "notify": true,
-    "capture": {
-      "enabled": true,
-      "maxStateTokens": 32000,
-      "deferWhileBusy": true,
-      "thresholds": {
-        "worthCapturing": 2,
-        "taskSucceeded": 0.7,
-        "alreadyCovered": 0.5
-      },
-      "timeoutMs": 300000
-    },
-    "eval": {
-      "provider": "auto",
-      "model": "jev-latest",
-      "apiKeyEnv": "TYPESAFE_AI_API_KEY",
-      "thresholds": {
-        "reusable": 2,
-        "specific": 0.7,
-        "preconditions": 0.6,
-        "redundant": 0.5
-      },
-      "timeoutMs": 120000,
-      "maxOutputTokens": 512
-    }
-  }
+  "mcp": { "enabled": true, "startupTimeoutMs": 20000 }
 }
