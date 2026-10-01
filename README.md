@@ -1,6 +1,6 @@
 # _EIGEN_
 
-My Own Harness , self extensible skill set from clawhub, self u[dating working memory, fulls hell access , and telegram inetegration
+My Own Harness , self extensible skill set from clawhub, self updating memory.md, fulls shell access , and telegram inetegration
 
 
 ## Requirements
