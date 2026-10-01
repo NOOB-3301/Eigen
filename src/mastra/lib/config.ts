@@ -92,7 +92,7 @@ export const bootProblems = (c: Config, env: NodeJS.ProcessEnv = process.env): s
 export const resolveEnvRefs = (values: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env) =>
   values && mapValues(values, (v) => (v.startsWith("env:") ? (env[v.slice(4)] ?? "") : v));
 
-export function toMastraModel(m: ModelEntry, env: NodeJS.ProcessEnv = process.env) {
+export function toMastraModel(m: Pick<ModelEntry, "id" | "url" | "apiKeyEnv">, env: NodeJS.ProcessEnv = process.env) {
   const apiKey = m.apiKeyEnv ? env[m.apiKeyEnv] : undefined;
   return m.url || apiKey ? { id: m.id as `${string}/${string}`, url: m.url, apiKey } : m.id;
 }

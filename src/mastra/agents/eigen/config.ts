@@ -1,9 +1,11 @@
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { agentConfig } from "@mastra/core/agent";
+import { TokenLimiterProcessor } from "@mastra/core/processors";
 import { boot } from "../../lib/boot.ts";
-import { toMastraModel } from "../../lib/config.ts";
+import { toMastraModel, tokenBudget } from "../../lib/config.ts";
 
 const config = await boot();
+const budget = tokenBudget(config.models[config.defaultModel]!);
 
 const telegram = createTelegramAdapter({
   botToken: process.env[config.telegram.tokenEnv],
@@ -14,6 +16,7 @@ const telegram = createTelegramAdapter({
 export default agentConfig({
   model: () => toMastraModel(config.models[config.defaultModel]!),
   defaultOptions: { maxSteps: config.limits.maxSteps },
+  inputProcessors: budget ? [new TokenLimiterProcessor({ limit: budget })] : [],
   channels: {
     // toolDisplay returning undefined hides tool chatter; approval prompts still render as Approve/Deny buttons.
     adapters: { telegram: { adapter: telegram, streaming: true, toolDisplay: () => undefined } },

@@ -27,6 +27,8 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   const cfg = JSON.parse(readFileSync(p.configFile, "utf8"));
   Object.assign(cfg, { telegram: { ...cfg.telegram, allowedUserIds: [7] }, sandbox: { ...cfg.sandbox, isolation: "none" }, ...config });
   cfg.models.local.url = llm.url;
+  cfg.memory.embedder.url = llm.url;
+  cfg.curatorModel = "local";
   writeFileSync(p.configFile, JSON.stringify(cfg));
 
   const proc = spawn("node", [join(ROOT, ".mastra/output/index.mjs")], {
@@ -45,6 +47,7 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
     p,
     tg,
     llm,
+    api: (path: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}/api${path}`, init).then((r) => r.json()) as Promise<any>,
     log: () => log,
     stop: async () => {
       proc.kill("SIGKILL");

@@ -26,20 +26,35 @@ function send(res: ServerResponse, stream: boolean, turn: Turn) {
   res.end("data: [DONE]\n\n");
 }
 
+/** Deterministic 128-dim bag-of-words embedding: texts sharing words are close in cosine distance. */
+export function embed(text: string) {
+  const v = new Array<number>(128).fill(0);
+  for (const w of text.toLowerCase().match(/[a-z]+/g) ?? []) v[[...w].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 128, 7)]! += 1;
+  const norm = Math.hypot(...v) || 1;
+  return v.map((x) => x / norm);
+}
+
 /** A scripted OpenAI-compatible server. Each request consumes the next turn (the last one repeats). */
 export async function fakeLlm(turns: Turn[]) {
   const requests: Array<{ messages: Array<Record<string, any>>; tools?: Array<{ function: { name: string } }> }> = [];
+  const embeddings: string[] = [];
   let i = 0;
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const json = JSON.parse(body);
+      if (req.url?.endsWith("/embeddings")) {
+        const inputs: string[] = [json.input].flat();
+        embeddings.push(...inputs);
+        res.setHeader("content-type", "application/json");
+        return res.end(JSON.stringify({ object: "list", model: "fake-embed", data: inputs.map((t, index) => ({ object: "embedding", index, embedding: embed(t) })), usage: { prompt_tokens: 1, total_tokens: 1 } }));
+      }
       requests.push(json);
       send(res, !!json.stream, turns[Math.min(i++, turns.length - 1)]!);
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}/v1`, requests, close: () => new Promise<void>((r) => server.close(() => r())) };
+  return { url: `http://127.0.0.1:${port}/v1`, requests, embeddings, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
