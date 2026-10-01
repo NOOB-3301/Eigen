@@ -1,7 +1,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-export type Turn = { text?: string; calls?: Array<{ name: string; args: Record<string, unknown> }> };
+export type Turn = { text?: string; calls?: Array<{ name: string; args: Record<string, unknown> }>; delayMs?: number };
 
 const chunk = (delta: object, finish: string | null = null) => ({
   id: "chatcmpl-fake",
@@ -36,7 +36,7 @@ export function embed(text: string) {
 
 /** A scripted OpenAI-compatible server. Each request consumes the next turn (the last one repeats). */
 export async function fakeLlm(turns: Turn[]) {
-  const requests: Array<{ messages: Array<Record<string, any>>; tools?: Array<{ function: { name: string } }> }> = [];
+  const requests: Array<{ model?: string; messages: Array<Record<string, any>>; tools?: Array<{ function: { name: string } }> }> = [];
   const embeddings: string[] = [];
   let i = 0;
   const server = createServer((req, res) => {
@@ -51,7 +51,9 @@ export async function fakeLlm(turns: Turn[]) {
         return res.end(JSON.stringify({ object: "list", model: "fake-embed", data: inputs.map((t, index) => ({ object: "embedding", index, embedding: embed(t) })), usage: { prompt_tokens: 1, total_tokens: 1 } }));
       }
       requests.push(json);
-      send(res, !!json.stream, turns[Math.min(i++, turns.length - 1)]!);
+      const turn = turns[Math.min(i++, turns.length - 1)]!;
+      const timer = setTimeout(() => !res.destroyed && send(res, !!json.stream, turn), turn.delayMs ?? 0);
+      res.on("close", () => clearTimeout(timer));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));

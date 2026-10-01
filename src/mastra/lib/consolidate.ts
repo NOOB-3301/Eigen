@@ -16,7 +16,7 @@ export type Deps = {
 
 const stateFile = (p: HomePaths) => join(p.dataDir, "consolidation.json");
 
-const lastRunAt = (p: HomePaths) => {
+export const lastRunAt = (p: HomePaths) => {
   try {
     return new Date(JSON.parse(readFileSync(stateFile(p), "utf8")).lastRunAt);
   } catch {

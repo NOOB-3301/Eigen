@@ -26,7 +26,7 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   seedHome(p, join(ROOT, "defaults"));
   const cfg = JSON.parse(readFileSync(p.configFile, "utf8"));
   Object.assign(cfg, { telegram: { ...cfg.telegram, allowedUserIds: [7] }, sandbox: { ...cfg.sandbox, isolation: "none" }, ...config });
-  cfg.models.local.url = llm.url;
+  for (const m of Object.values<any>(cfg.models)) m.url = llm.url;
   cfg.memory.embedder.url = llm.url;
   cfg.curatorModel = "local";
   writeFileSync(p.configFile, JSON.stringify(cfg));
