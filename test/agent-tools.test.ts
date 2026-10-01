@@ -31,10 +31,10 @@ const call = (name: string, args: Record<string, unknown>): Turn => ({ calls: [{
 const bash = (command: string, extra: Record<string, unknown> = {}) => call("bash", { description: "test", command, ...extra });
 
 describe("agent tools (real agent, fake model)", () => {
-  it("exposes exactly read, write, edit and bash", async () => {
+  it("exposes read, write, edit and bash, plus Mastra's skill tools", async () => {
     const { agent, llm } = await setup([{ text: "hi" }]);
     await agent.generate("go");
-    expect(llm.requests[0]!.tools!.map((t) => t.function.name).sort()).toEqual(["bash", "edit", "read", "write"]);
+    expect(llm.requests[0]!.tools!.map((t) => t.function.name).sort()).toEqual(["bash", "edit", "read", "skill", "skill_read", "skill_search", "write"]);
   });
 
   it("writes, reads and edits files inside the sandbox", async () => {

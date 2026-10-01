@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compact, truncate } from "lodash-es";
 import type { HomePaths } from "./home.ts";
+import { reportFile } from "./skills.ts";
 import { clockLine } from "./time.ts";
 
 export const MEMORY_FILES = ["MEMORY.md", "profile.md", "projects.md", "people.md", "lessons.md"];
@@ -30,5 +31,6 @@ export const buildInstructions = (p: HomePaths, zone: string, at?: Date) =>
     tag("operating_instructions", readText(p.systemPromptFile) || FALLBACK),
     tag("soul", readText(p.soulFile)),
     tag("memory", memoryBlock(p.memoryDir)),
+    tag("skill_notes", readText(reportFile(p))),
     clockLine(zone, at),
   ]).join("\n\n");

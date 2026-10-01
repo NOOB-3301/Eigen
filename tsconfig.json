@@ -24,6 +24,8 @@
     "e2e/**/*",
     "scripts/**/*",
     "vitest.config.ts",
-    "vitest.e2e.config.ts"
+    "vitest.e2e.config.ts",
+    "live/**/*",
+    "vitest.live.config.ts"
   ]
 }
