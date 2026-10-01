@@ -14,6 +14,9 @@ const telegram = createTelegramAdapter({
 export default agentConfig({
   model: () => toMastraModel(config.models[config.defaultModel]!),
   defaultOptions: { maxSteps: config.limits.maxSteps },
-  workspace: undefined,
-  channels: { adapters: { telegram }, handlers: { onMention: false, onSubscribedMessage: false } },
+  channels: {
+    // toolDisplay returning undefined hides tool chatter; approval prompts still render as Approve/Deny buttons.
+    adapters: { telegram: { adapter: telegram, streaming: true, toolDisplay: () => undefined } },
+    handlers: { onMention: false, onSubscribedMessage: false },
+  },
 });

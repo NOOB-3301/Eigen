@@ -36,6 +36,7 @@ export const ConfigSchema = z
         readWritePaths: z.array(z.string()).default([]),
         readOnlyPaths: z.array(z.string()).default([]),
         commandTimeoutMs: posInt.default(120_000),
+        maxTimeoutSec: posInt.default(900),
       })
       .prefault({}),
     memory: z

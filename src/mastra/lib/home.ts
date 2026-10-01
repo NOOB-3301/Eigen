@@ -33,7 +33,7 @@ export function homePaths(home = eigenHome()) {
 }
 
 export function ensureDirs(p: HomePaths) {
-  const dirs = [p.home, p.userSkillsDir, p.sandboxSkillsDir, p.sandboxHomeDir, p.memoryDir, p.dataDir, p.logsDir, dirname(p.systemPromptFile)];
+  const dirs = [p.home, p.userSkillsDir, p.sandboxSkillsDir, join(p.sandboxHomeDir, "tmp"), p.memoryDir, p.dataDir, p.logsDir, dirname(p.systemPromptFile)];
   dirs.forEach((d) => mkdirSync(d, { recursive: true }));
 }
 

@@ -14,7 +14,8 @@
     "serve": "mastra start --env ${EIGEN_HOME:-$HOME/.eigen}/.env",
     "start": "npm run build && npm run serve",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "mastra build && vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@chat-adapter/telegram": "4.41.1",
