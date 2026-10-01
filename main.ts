@@ -47,6 +47,7 @@ const agent = new Agent({ config, home });
 // Connect MCP servers before polling starts so the first message already sees their tools.
 const mcpStatus = await agent.startMcp();
 logger.info({ evt: "mcp_ready", servers: mcpStatus.length, connected: mcpStatus.filter((s) => s.ok).length, tools: agent.mcp.toolCount() });
+console.log(`Agents initiated with config ${JSON.stringify(config, null, 2)} , mcpServer Status ${JSON.stringify(agent.mcp.list(), null, 2) } and Skills ${JSON.stringify(agent.skills.slugs(), null, 2)} `);
 const telegram = new TelegramChannel(config.telegram, agent);
 
 let stopping = false;

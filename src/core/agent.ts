@@ -9,6 +9,12 @@ import { loadPrompts } from "../prompts/loader.ts";
 import type { PromptPaths, PromptSet } from "../prompts/loader.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { McpManager } from "../tools/mcp/client.ts";
+import { createSkillTools } from "../skills/tools.ts";
+import { SkillStore } from "../skills/store.ts";
+import type { Skill, SkillDraft } from "../skills/store.ts";
+import { SkillCapture, transcriptOf } from "../skills/capture.ts";
+import { evaluateDraft, validateDraft } from "../skills/eval.ts";
+import { watchSkills } from "../skills/watch.ts";
 import type { ServerStatus } from "../tools/mcp/client.ts";
 import { currentTime } from "../tools/builtin/current-time.ts";
 import { httpFetch } from "../tools/builtin/http-fetch.ts";
@@ -17,11 +23,26 @@ import { shellExec } from "../tools/builtin/shell.ts";
 import { runCode } from "../tools/builtin/run-code.ts";
 import { configureShellEnv, killAll, resetSession } from "../tools/builtin/shell-session.ts";
 import { EventBus } from "./events.ts";
+import type { Message } from "./types.ts";
 import type { Listener } from "./events.ts";
 import { runLoop } from "./loop.ts";
 import { SessionStore } from "./session.ts";
 import type { Session } from "./session.ts";
 import { logger } from "../util/logger.ts";
+
+function validateOnly(draft: SkillDraft, store: SkillStore): string[] {
+  return validateDraft(draft, store);
+}
+
+// Capture only needs the conversation, and provider blobs (SDK message objects) are
+// not always structured-cloneable, so they are dropped here rather than copied.
+function snapshotForCapture(messages: Message[]): Message[] {
+  return messages.map((m) => ({ role: m.role, parts: structuredClone(m.parts) }));
+}
+
+function transcriptFor(messages: Message[]): string {
+  return transcriptOf(messages);
+}
 
 export function createBuiltinTools(): ToolRegistry {
   return new ToolRegistry().register(shellExec).register(runCode).register(readFileTool).register(httpFetch).register(currentTime);
@@ -51,6 +72,7 @@ export type Status = {
   messages: number;
   tools: number;
   mcpServers: ServerStatus[];
+  skills: { total: number; custom: number };
 };
 
 export type ModelInfo = { name: string; entry: ModelEntry; isDefault: boolean };
@@ -62,6 +84,11 @@ export class Agent {
   readonly tools: ToolRegistry;
   readonly usage = new UsageTracker();
   readonly mcp: McpManager;
+  readonly skills: SkillStore;
+  #capture: SkillCapture;
+  #watcher?: { close(): void };
+  // Last completed run per session, for /save-skill.
+  #lastRun = new Map<string, Message[]>();
   #config: Config;
   #paths: PromptPaths;
   #prompts: PromptSet; // what the next new session gets
@@ -70,13 +97,43 @@ export class Agent {
 
   constructor(deps: AgentDeps) {
     this.#config = deps.config;
-    console.log(`Agent initialized with ${Object.keys(deps.config.models).length} models and ${deps.config.mcpServers.length} MCP servers.`);
-    console.log("Config is:", JSON.stringify(deps.config, null, 2));
     this.#paths = { home: deps.home, defaultsDir: deps.defaultsDir ?? DEFAULTS_DIR };
     this.models = deps.models ?? new ModelRegistry(deps.config, deps.fetch);
     this.tools = deps.tools ?? createBuiltinTools();
     this.#prompts = loadPrompts(this.#paths);
     this.mcp = new McpManager(this.tools, deps.config.mcp, deps.config.limits.toolTimeoutMs);
+    
+    this.skills = new SkillStore(this.#paths.home, deps.config.skills);
+    if (deps.config.skills.enabled) {
+      this.skills.load();
+      for (const t of createSkillTools({ store: this.skills, save: (d) => this.saveSkill(d) })) this.tools.register(t);
+      if (deps.config.skills.watch) this.#watcher = watchSkills(this.skills, () => this.#refreshSkillIndex());
+    }
+    this.#capture = new SkillCapture({
+      store: this.skills,
+      cfg: deps.config.skills,
+      entryFor: (n) => this.models.entry(n),
+      providerFor: (n) => this.models.provider(n),
+      isBusy: (id) => this.#sessions.get(id)?.runState === "running",
+      overCap: (n) => this.usage.overCap(n, this.models.entry(n).dailyTokenCap),
+      onUsage: (n, tokens) => this.usage.add(n, tokens),
+      onSaved: (sessionId, skill) => {
+        this.#refreshSkillIndex();
+        this.#bus.emit({ type: "notice", sessionId, text: `📎 learned skill: ${skill.slug} — ${skill.description}` });
+      },
+    });
+    // Capture runs strictly after a run is done and its reply is already outbound.
+    this.#bus.on((e) => {
+      if (e.type !== "done") return;
+      const session = this.#sessions.get(e.sessionId);
+      if (!session) return;
+      const snapshot = snapshotForCapture(session.messages);
+      if (e.reason !== "end") return; // gate 1: only successful runs are captured
+      this.#lastRun.set(e.sessionId, snapshot);
+      // Enqueued synchronously so a caller awaiting skillsIdle() always sees the job;
+      // the pipeline itself yields a tick before checking whether the session is busy.
+      this.#capture.schedule({ sessionId: e.sessionId, runId: e.runId, messages: snapshot, entryName: session.model });
+    });
     const secretEnv = Object.values(deps.config.models).flatMap((e) => (e.apiKeyEnv ? [e.apiKeyEnv] : []));
     configureShellEnv([...secretEnv, deps.config.telegram.tokenEnv]);
   }
@@ -102,6 +159,71 @@ export class Agent {
     if (!status.length) return { ok: true, message: "MCP reloaded: no servers configured." };
     const lines = status.map((s) => (s.ok ? `▸ ${s.name}: ${s.tools} tools (${s.transport})` : `✗ ${s.name}: ${s.error}`));
     return { ok: status.every((s) => s.ok), message: `MCP reloaded.\n${lines.join("\n")}` };
+  }
+
+  #skillIndex(): string {
+    return this.#config.skills.enabled ? this.skills.indexText() : "";
+  }
+
+  // New sessions get the new index; existing ones keep their frozen prompt (cache stability).
+  #refreshSkillIndex(): void {
+    this.#prompts = { ...this.#prompts, skills: this.#skillIndex() };
+  }
+
+  // The one path that writes a skill: used by skill_save, /save-skill and capture.
+  async saveSkill(draft: SkillDraft, opts: { force?: boolean; entryName?: string } = {}): Promise<{ ok: boolean; slug?: string; reasons: string[] }> {
+    const entryName = opts.entryName ?? this.models.defaultName;
+    const deps = { entry: this.models.entry(entryName), entryName, provider: this.models.provider(entryName) };
+    const verdict = opts.force
+      ? { ok: !validateOnly(draft, this.skills).length, reasons: validateOnly(draft, this.skills), score: undefined }
+      : await evaluateDraft(draft, this.skills, this.#config.skills, deps);
+    if (!verdict.ok) return { ok: false, reasons: verdict.reasons };
+    const skill = this.skills.write(draft, "agent-created", verdict.score);
+    this.#refreshSkillIndex();
+    return { ok: true, slug: skill.slug, reasons: [] };
+  }
+
+  // /save-skill: draft from the last completed run, then the same gate.
+  async saveSkillFromLastRun(sessionId: string, opts: { name?: string; force?: boolean } = {}): Promise<Result> {
+    if (!this.#config.skills.enabled) return { ok: false, message: "Skills are disabled in config." };
+    const messages = this.#lastRun.get(sessionId);
+    if (!messages?.length) return { ok: false, message: "No completed run to save yet. Ask me to do something first." };
+    const session = this.#session(sessionId);
+    const entryName = this.#config.skills.capture.model ?? session.model;
+    const draft = await this.#capture.draft(transcriptFor(messages), {
+      entry: this.models.entry(entryName),
+      entryName,
+      provider: this.models.provider(entryName),
+      timeoutMs: this.#config.skills.capture.timeoutMs,
+    });
+    if (!draft) return { ok: false, message: "Could not turn that run into a skill draft." };
+    if (opts.name) draft.name = opts.name;
+    const r = await this.saveSkill(draft, { force: opts.force, entryName });
+    return r.ok ? { ok: true, message: `Saved skill "${r.slug}".` } : { ok: false, message: `Not saved:\n- ${r.reasons.join("\n- ")}` };
+  }
+
+  // Lets a caller (smoke script, tests) wait for post-run skill capture to settle.
+  async skillsIdle(): Promise<void> {
+    await this.#capture.idle();
+  }
+
+  reloadSkills(): Result {
+    if (!this.#config.skills.enabled) return { ok: false, message: "Skills are disabled in config." };
+    const { loaded, invalid } = this.skills.load();
+    this.#refreshSkillIndex();
+    const { custom } = this.skills.count();
+    const problems = invalid.map((i) => `✗ ${i.path.split("/").slice(-2).join("/")}: ${i.reason}`);
+    return { ok: !invalid.length, message: [`Skills reloaded: ${loaded} (${custom} custom).`, ...problems].join("\n") };
+  }
+
+  forgetSkill(slug: string): Result {
+    try {
+      const removed = this.skills.remove(slug);
+      this.#refreshSkillIndex();
+      return removed ? { ok: true, message: `Deleted skill "${slug}".` } : { ok: false, message: `No skill "${slug}".` };
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
   }
 
   on(fn: Listener): () => void {
@@ -130,7 +252,8 @@ export class Agent {
   // Re-reads prompts for future sessions. On failure the previous prompts stay in force.
   reload(): Result {
     try {
-      this.#prompts = loadPrompts(this.#paths);
+      // Keep the skill index: it is part of the prompt set but has its own lifecycle.
+      this.#prompts = { ...loadPrompts(this.#paths), skills: this.#skillIndex() };
     } catch (e) {
       logger.error({ evt: "reload_failed", err: (e as Error).message });
       return { ok: false, message: `Reload failed, keeping the previous prompts: ${(e as Error).message}` };
@@ -143,6 +266,7 @@ export class Agent {
     const old = this.#sessions.get(sessionId);
     if (old) this.#sessions.cancel(old);
     resetSession(sessionId); // fresh session, fresh shell
+    this.#lastRun.delete(sessionId);
     const r = this.reload();
     this.#sessions.create({ id: sessionId, model: old?.model ?? this.models.defaultName, verbose: old?.verbose, prompts: this.#prompts });
     return { ok: r.ok, message: r.ok ? `New session started.${this.#prompts.notes.length ? `\n${this.#prompts.notes.join("\n")}` : ""}` : `New session started. ${r.message}` };
@@ -164,6 +288,7 @@ export class Agent {
       messages: s.messages.length,
       tools: this.tools.names().length,
       mcpServers: this.mcp.status(),
+      skills: this.skills.count(),
     };
   }
 
@@ -202,6 +327,8 @@ export class Agent {
   async shutdown(): Promise<void> {
     for (const s of this.#sessions.all()) this.#sessions.cancel(s);
     killAll();
+    this.#capture.stop();
+    this.#watcher?.close();
     await this.mcp.close();
   }
 }

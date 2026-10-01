@@ -17,6 +17,7 @@
     "@ai-sdk/anthropic": "^4.0.58",
     "@ai-sdk/mcp": "^2.0.54",
     "@ai-sdk/openai-compatible": "^3.0.53",
+    "@ai-sdk/typesafe-ai": "^3.0.4",
     "ai": "^7.0.107",
     "grammy": "^1.46.0",
     "pino": "^10.3.1",

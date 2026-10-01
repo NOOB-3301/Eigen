@@ -74,6 +74,11 @@ export function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
     },
     mcpServers: {},
     mcp: { enabled: true, startupTimeoutMs: 20_000 },
+    skills: {
+      enabled: true, watch: false, maxSkills: 64, indexMaxTokens: 800, allowCustomEdits: false, notify: true,
+      capture: { enabled: false, maxStateTokens: 32_000, deferWhileBusy: true, timeoutMs: 300_000, thresholds: { worthCapturing: 2, alreadyCovered: 0.5, taskSucceeded: 0.7 } },
+      eval: { provider: "local", model: "jev-latest", apiKeyEnv: "TYPESAFE_AI_API_KEY", timeoutMs: 120_000, maxOutputTokens: 512, thresholds: { reusable: 2, specific: 0.7, preconditions: 0.6, redundant: 0.5 } },
+    },
   };
 }
 

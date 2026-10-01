@@ -107,6 +107,13 @@ export class McpManager {
     this.#toolTimeoutMs = toolTimeoutMs ?? opts.toolTimeoutMs;
   }
 
+  list(): string[] {
+    console.log("=== MCP clients ===");
+    console.log([...this.#clients.keys()]);
+    return [...this.#clients.keys()];
+  }
+
+    
   status(): ServerStatus[] {
     return this.#status;
   }

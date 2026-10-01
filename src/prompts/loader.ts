@@ -8,6 +8,8 @@ export type PromptFile = "system" | "soul";
 export type PromptSet = {
   system: string;
   soul: string;
+  // Rendered skill index (name + description per skill); filled by the agent.
+  skills?: string;
   // Where each came from, so /reload can tell the user about fallbacks.
   sources: Record<PromptFile, "home" | "default">;
   notes: string[];

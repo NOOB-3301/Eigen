@@ -19,9 +19,20 @@ export type ChatResult = {
   latencyMs: number;
 };
 
+export type EvaluateRequest = {
+  state: unknown;
+  questions: Record<string, unknown>;
+  entry: ModelEntry;
+  signal?: AbortSignal;
+};
+
+export type EvaluateResult = { answers: Record<string, unknown>; usage?: { inputTokens?: number; outputTokens?: number } };
+
 export interface ModelProvider {
   readonly kind: string;
   chat(req: ChatRequest): Promise<ChatResult>;
+  // Optional capability: only providers with an SDK evaluation model implement it.
+  evaluate?(req: EvaluateRequest): Promise<EvaluateResult>;
 }
 
 export type FetchFn = typeof fetch;

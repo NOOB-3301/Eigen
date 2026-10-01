@@ -7,7 +7,7 @@ import { estimateText, estimateTools } from "../util/tokens.ts";
 export type BlockName = "system" | "soul" | "memory" | "skills";
 export type BlockInfo = { name: BlockName; tokens: number };
 
-// Fixed order, stable-first. memory and skills are reserved seams that render nothing yet.
+// Fixed order, stable-first. memory is still a reserved seam.
 export const BLOCK_ORDER: readonly BlockName[] = ["system", "soul", "memory", "skills"];
 
 const TAG: Record<BlockName, string> = {
@@ -18,7 +18,7 @@ const TAG: Record<BlockName, string> = {
 };
 
 export function renderSystem(prompts: PromptSet): { system: string; blocks: BlockInfo[] } {
-  const bodies: Record<BlockName, string> = { system: prompts.system, soul: prompts.soul, memory: "", skills: "" };
+  const bodies: Record<BlockName, string> = { system: prompts.system, soul: prompts.soul, memory: "", skills: prompts.skills ?? "" };
   const blocks: BlockInfo[] = [];
   const rendered: string[] = [];
   for (const name of BLOCK_ORDER) {

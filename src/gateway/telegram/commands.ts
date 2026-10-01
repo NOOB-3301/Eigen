@@ -9,6 +9,11 @@ const HELP = [
   "/model [name] – list models or switch this session",
   "/reload – re-read SOUL.md and prompts for the next session",
   "/reload_mcp – reconnect the MCP servers from config.json",
+  "/skills – list learned and custom skills",
+  "/skill <slug> – show one skill",
+  "/save_skill [name] [--force] – save the last run as a skill",
+  "/forget_skill <slug> – delete a learned skill",
+  "/reload_skill – re-scan the skills folders",
   "/verbose – toggle tool progress notes",
 ].join("\n");
 
@@ -50,6 +55,7 @@ export function createCommands(agent: Agent, outbox: Outbox): (chatId: number, t
             `Tokens today (${s.model}): ${s.tokensToday}${s.dailyTokenCap ? ` / ${s.dailyTokenCap}` : ""}`,
             `History: ${s.messages} messages, verbose: ${s.verbose ? "on" : "off"}`,
             mcpLine(s),
+            `Skills: ${s.skills.total} (${s.skills.custom} custom)`,
           ].join("\n"),
         );
         break;
@@ -69,6 +75,41 @@ export function createCommands(agent: Agent, outbox: Outbox): (chatId: number, t
       }
       case "reload":
         reply(agent.reload().message);
+        break;
+      case "skills": {
+        const all = agent.skills.all();
+        if (!all.length) {
+          reply("No skills yet. I save one after a run worth remembering, or use /save_skill.");
+          break;
+        }
+        reply(
+          all
+            .map((s) => `${s.source === "custom" ? "•" : "▸"} ${s.slug} (v${s.meta.version}, ${s.meta.uses} uses)\n   ${s.description}`)
+            .join("\n"),
+        );
+        break;
+      }
+      case "skill": {
+        const skill = agent.skills.get(arg);
+        if (!skill) reply(`No skill "${arg}". Try /skills.`);
+        else reply([`${skill.name} (v${skill.meta.version}, ${skill.source})`, skill.description, skill.when ? `When: ${skill.when}` : "", "", skill.body.slice(0, 1500)].filter(Boolean).join("\n"));
+        break;
+      }
+      case "save_skill":
+      case "save-skill": {
+        const force = /--force\b/.test(arg);
+        const name = arg.replace(/--force\b/, "").trim();
+        reply("Saving the last run as a skill…");
+        void agent.saveSkillFromLastRun(sid, { name: name || undefined, force }).then((r) => reply(r.message));
+        break;
+      }
+      case "forget_skill":
+      case "forget-skill":
+        reply(arg ? agent.forgetSkill(arg).message : "Usage: /forget_skill <slug>");
+        break;
+      case "reload_skill":
+      case "reload-skill":
+        reply(agent.reloadSkills().message);
         break;
       // Telegram only auto-links [A-Za-z0-9_], so the underscore form is the canonical one.
       case "reload_mcp":

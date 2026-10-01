@@ -6,6 +6,8 @@ export type AgentEvent =
   | { type: "tool_start"; sessionId: string; runId: string; callId: string; name: string; args: Record<string, unknown> }
   | { type: "tool_end"; sessionId: string; runId: string; callId: string; name: string; ok: boolean; durationMs: number }
   | { type: "error"; sessionId: string; runId: string; message: string }
+  // Out-of-band message from the agent itself (e.g. a skill was learned after a run).
+  | { type: "notice"; sessionId: string; text: string }
   | { type: "done"; sessionId: string; runId: string; reason: DoneReason; steps: number; tokens: number };
 
 export type Listener = (e: AgentEvent) => void;

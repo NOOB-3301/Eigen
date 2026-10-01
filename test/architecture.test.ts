@@ -29,7 +29,8 @@ const layer = (abs: string) => relative(SRC, abs).split(sep)[0]!;
 // Who may import whom (runtime imports). Any module may `import type` from core/types.ts.
 const ALLOWED: Record<string, string[]> = {
   gateway: ["gateway", "core", "config", "util"],
-  core: ["core", "models", "tools", "prompts", "config", "util"],
+  core: ["core", "models", "tools", "prompts", "skills", "config", "util"],
+  skills: ["skills", "models", "tools", "config", "util"],
   models: ["models", "config", "util"],
   tools: ["tools", "config", "util"],
   prompts: ["prompts", "util"],

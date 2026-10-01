@@ -31,6 +31,9 @@ export function createDispatcher(agent: Agent, outbox: Outbox) {
       case "tool_end":
         if (verbose && !e.ok) outbox.send(chat, `✗ ${e.name} failed (${e.durationMs} ms)`);
         break;
+      case "notice":
+        outbox.send(chat, e.text);
+        break;
       case "error":
         outbox.send(chat, `⚠ ${e.message}`);
         break;

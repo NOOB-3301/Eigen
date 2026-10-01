@@ -49,5 +49,37 @@
   "mcp": {
     "enabled": true,
     "startupTimeoutMs": 20000
+  },
+  "skills": {
+    "enabled": true,
+    "watch": true,
+    "maxSkills": 64,
+    "indexMaxTokens": 800,
+    "allowCustomEdits": false,
+    "notify": true,
+    "capture": {
+      "enabled": true,
+      "maxStateTokens": 32000,
+      "deferWhileBusy": true,
+      "thresholds": {
+        "worthCapturing": 2,
+        "taskSucceeded": 0.7,
+        "alreadyCovered": 0.5
+      },
+      "timeoutMs": 300000
+    },
+    "eval": {
+      "provider": "auto",
+      "model": "jev-latest",
+      "apiKeyEnv": "TYPESAFE_AI_API_KEY",
+      "thresholds": {
+        "reusable": 2,
+        "specific": 0.7,
+        "preconditions": 0.6,
+        "redundant": 0.5
+      },
+      "timeoutMs": 120000,
+      "maxOutputTokens": 512
+    }
   }
 }

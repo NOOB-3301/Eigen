@@ -192,6 +192,7 @@ async function runTools(calls: ToolCall[], signal: AbortSignal, { session, runId
       continue;
     }
     deps.emit({ type: "tool_start", sessionId: session.id, runId, callId: call.id, name: call.name, args: call.args });
+    console.log(`Calling tool ${call.name} with args:`, JSON.stringify(call.args, null, 2));
     const r = await executeTool(call, {
       registry: deps.tools,
       signal,
@@ -200,6 +201,7 @@ async function runTools(calls: ToolCall[], signal: AbortSignal, { session, runId
       maxTimeoutMs: deps.limits.toolMaxTimeoutMs,
       maxOutputChars: deps.limits.toolOutputMaxChars,
     });
+    console.log(`Tool ${call.name} returned:`, JSON.stringify(r, null, 2));
     deps.emit({ type: "tool_end", sessionId: session.id, runId, callId: call.id, name: call.name, ok: !r.isError, durationMs: r.durationMs });
     logger.info({ evt: "tool_call", session: session.id, runId, tool: call.name, kind: r.kind, durationMs: r.durationMs });
     if (r.kind === "unknown_tool" || r.kind === "invalid_args") bad = true;

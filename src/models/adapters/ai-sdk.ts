@@ -1,4 +1,4 @@
-import { APICallError, generateText, jsonSchema, tool } from "ai";
+import { APICallError, experimental_evaluate, generateText, jsonSchema, tool } from "ai";
 import type { AssistantModelMessage, LanguageModel, ModelMessage, ToolSet } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -6,7 +6,7 @@ import type { ModelEntry } from "../../config/schema.ts";
 import type { Message, Part, StopReason, ToolCall } from "../../core/types.ts";
 import { classifyHttp, ModelError } from "../errors.ts";
 import { apiKey, degradeImages, textOf } from "../provider.ts";
-import type { ChatRequest, ChatResult, FetchFn, ModelProvider } from "../provider.ts";
+import type { ChatRequest, ChatResult, EvaluateRequest, EvaluateResult, FetchFn, ModelProvider } from "../provider.ts";
 import { isAbortError } from "../../util/abort.ts";
 import { logger } from "../../util/logger.ts";
 
@@ -38,6 +38,15 @@ function safeJson(body: unknown): unknown {
   } catch {
     return body.slice(0, 2000);
   }
+}
+
+// Anthropic (and OpenAI/Google) expose an evaluation model; openai-compatible does not.
+function evaluationModelFor(entry: ModelEntry, fetchFn: FetchFn) {
+  if (entry.provider !== "anthropic") return undefined;
+  const key = apiKey(entry);
+  if (!key) return undefined;
+  const provider = createAnthropic({ baseURL: entry.baseUrl, apiKey: key, fetch: fetchFn });
+  return provider.evaluationModel?.(entry.model);
 }
 
 function modelFor(entry: ModelEntry, fetchFn: FetchFn): LanguageModel {
@@ -129,12 +138,18 @@ export function createAiSdkProvider(fetchFn: FetchFn = fetch): ModelProvider {
   const wrapped = loggingFetch(fetchFn);
   return {
     kind: "ai-sdk",
+    async evaluate(req: EvaluateRequest): Promise<EvaluateResult> {
+      const model = evaluationModelFor(req.entry, wrapped);
+      if (!model) throw new ModelError("bad_request", `entry "${req.entry.model}" has no evaluation model`);
+      const r = await experimental_evaluate({ model, state: req.state as never, questions: req.questions as never, abortSignal: req.signal });
+      return { answers: r.answers as Record<string, unknown>, usage: r.usage };
+    },
     async chat(req: ChatRequest): Promise<ChatResult> {
       const { entry } = req;
       const started = Date.now();
       let messages = toModelMessages(degradeImages(req.messages, entry.vision));
       if (entry.promptCaching) messages = withCacheControl(messages);
-
+      
       let r;
       try {
         r = await generateText({
@@ -150,7 +165,6 @@ export function createAiSdkProvider(fetchFn: FetchFn = fetch): ModelProvider {
       } catch (e) {
         throw normalizeError(e);
       }
-
       const parts: Part[] = [];
       if (r.text.trim()) parts.push({ type: "text", text: r.text });
       const toolCalls: ToolCall[] = r.toolCalls.map((c) => {

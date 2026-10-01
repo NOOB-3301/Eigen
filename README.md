@@ -137,6 +137,7 @@ Commands run immediately and never wait behind a run. If you send text while a r
 | `shell_exec` | Persistent bash per chat session: `cd`, `export`, activated venvs carry over between calls. Starts in `~`. Non-interactive (stdin closed), so `sudo` password prompts and `[y/N]` questions fail fast instead of hanging. Optional `timeoutSec` for slow commands (capped by `limits.toolMaxTimeoutMs`, default 15 min). A timeout or `/stop` kills the shell and its children; the next call gets a fresh shell and is told so. `/new` also resets it. |
 | `run_code` | Runs `python` / `javascript` / `typescript` / `bash`, either a `code` snippet (saved to `~/.eigen/workspace/snippets/` so you can inspect or re-run it) or an existing `path`, with `args`. Runs inside the session shell, so it uses that shell's cwd and virtualenv. |
 | `read_file`, `http_fetch`, `current_time` | As before. |
+| `skill_read`, `skill_update`, `skill_save` | Use, fix and store reusable procedures (see Skills). |
 
 Commands run **as you, with full access to your files**. Secrets are removed from the shell's environment: the env vars named in config (API keys, bot token) and any variable whose name contains `TOKEN`, `SECRET`, `API_KEY`/`APIKEY` or `PASSWORD`. Beyond that there is no sandbox or approval step yet, so a prompt-injected model could run anything you can. The `executeTool` hooks stage is where an approval gate goes.
 
@@ -170,6 +171,43 @@ Declare servers under `mcpServers` in `~/.eigen/config.json`. Their tools are re
 - After editing `mcpServers`, run `/reload_mcp` in Telegram — no restart needed. It closes the old clients, re-reads config.json and reconnects, reporting each server.
 - Tool names are namespaced, sanitized and capped at 64 characters, so two servers can expose the same tool name.
 - Security: MCP tools are ordinary tools here, so anything they can do, the model can trigger. Content they return is untrusted input — a tool that reads mail or web pages can carry prompt injection. The `executeTool` hooks stage is where an approval gate belongs before connecting anything that sends or deletes.
+
+## Skills
+
+eigen writes down procedures it works out, and reuses them later.
+
+```
+~/.eigen/skills/
+├── agent-created/<slug>/SKILL.md   # captured automatically after a successful run
+└── custom/<slug>/SKILL.md          # yours; /reload_skill picks up changes
+```
+
+**How capture works.** It runs *after* your reply has been sent, outside the agent loop, so it never adds latency and the model cannot forget to do it:
+
+| Gate | Cost | What it checks |
+|---|---|---|
+| 1 | free | the run ended cleanly (errored, cancelled and limit-stopped runs are never captured) |
+| 2 | one judge call | is a procedure here worth keeping? did the task actually succeed? is it already covered? |
+| 3 | one model call | draft a `SKILL.md` from the transcript |
+| 4 | validation + judge | no secrets, no credential paths, not a duplicate, concrete steps, stated preconditions |
+| 5 | — | save, hot-register, and tell you: `📎 learned skill: query-directus-api` |
+
+Only the `slug: description` line of each skill goes into the system prompt; the model calls `skill_read` to pull the full steps when a task matches, and `skill_update` when it finds the steps were wrong.
+
+**Judging** uses the first available of: Jev (`TYPESAFE_AI_API_KEY`, ~$0.0001 per eval), your Anthropic entry's evaluation model, or a local JSON judge on the session's own model (fully offline). Set `skills.eval.provider` to `"local"` to force everything to stay on your machine.
+
+```jsonc
+"skills": {
+  "enabled": true, "watch": true, "notify": true, "maxSkills": 64, "indexMaxTokens": 800,
+  "capture": { "enabled": true, "timeoutMs": 300000, "thresholds": { "worthCapturing": 2, "taskSucceeded": 0.7, "alreadyCovered": 0.5 } },
+  "eval": { "provider": "auto", "model": "jev-latest", "apiKeyEnv": "TYPESAFE_AI_API_KEY",
+            "maxOutputTokens": 512, "timeoutMs": 120000,
+            "thresholds": { "reusable": 2, "specific": 0.7, "preconditions": 0.6, "redundant": 0.5 } }
+}
+```
+Thresholds are config because judge probabilities are not calibrated across providers — tune them against your own runs. Commands: `/skills`, `/skill <slug>`, `/save_skill [name] [--force]`, `/forget_skill <slug>`, `/reload_skill`.
+
+Security: a skill body is text a model wrote from a session that may have contained untrusted content. The index only ever carries a validated one-line description, bodies load on demand, drafts containing secrets or credential paths are refused, and scripts are written non-executable and never run on their own.
 
 ## Development
 
