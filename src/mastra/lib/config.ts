@@ -3,6 +3,13 @@ import { compact, isEmpty, mapValues } from "lodash-es";
 import { z } from "zod";
 import { homePaths } from "./home.ts";
 
+/** macOS only: seatbelt can read everything unless told otherwise. (On Linux the sandbox never sees your home.) */
+const DENY_READ = [
+  "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.config", "~/.netrc", "~/.npmrc", "~/.zsh_history", "~/.bash_history",
+  "~/Library/Keychains", "~/Library/Application Support", "~/Library/Mail", "~/Library/Messages", "~/Library/Safari", "~/Library/Cookies",
+  "~/Documents", "~/Desktop", "~/Downloads",
+];
+
 const posInt = z.number().int().positive();
 const strMap = z.record(z.string(), z.string());
 
@@ -35,6 +42,7 @@ export const ConfigSchema = z
         allowNetwork: z.boolean().default(true),
         readWritePaths: z.array(z.string()).default([]),
         readOnlyPaths: z.array(z.string()).default([]),
+        denyReadPaths: z.array(z.string()).default(DENY_READ),
         commandTimeoutMs: posInt.default(120_000),
         maxTimeoutSec: posInt.default(900),
       })

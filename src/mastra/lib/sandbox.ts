@@ -3,6 +3,7 @@ import { LocalSandbox } from "@mastra/core/workspace";
 import { pick } from "lodash-es";
 import type { Config } from "./config.ts";
 import { expandHome, type HomePaths } from "./home.ts";
+import { writeSeatbeltProfile } from "./seatbelt.ts";
 
 const PASSTHROUGH = ["LANG", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"];
 
@@ -39,5 +40,12 @@ export const makeSandbox = (p: HomePaths, cfg: Config, isolation = resolveIsolat
       allowNetwork: cfg.sandbox.allowNetwork,
       readWritePaths: cfg.sandbox.readWritePaths.map(expandHome),
       readOnlyPaths: cfg.sandbox.readOnlyPaths.map(expandHome),
+      ...(isolation === "seatbelt" && { seatbeltProfilePath: writeSeatbeltProfile(p, cfg) }),
     },
   });
+
+/** Can a sandboxed command read the file holding your tokens? Run on /status, because the macOS rules can't be tested off a Mac. */
+export async function secretsHidden(sandbox: LocalSandbox, p: HomePaths) {
+  const r = await sandbox.executeCommand?.("cat", [p.envFile]).catch(() => undefined);
+  return r ? r.exitCode !== 0 : undefined;
+}

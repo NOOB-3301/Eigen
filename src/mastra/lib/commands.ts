@@ -1,5 +1,6 @@
 import type { SlashCommandChannelHandler } from "@mastra/core/channels";
 import type { Mastra } from "@mastra/core/mastra";
+import type { LocalSandbox } from "@mastra/core/workspace";
 import { compact, map, size, toPairs } from "lodash-es";
 import { getConfig, reloadConfig } from "./config.ts";
 import { lastRunAt, runConsolidation } from "./consolidate.ts";
@@ -7,6 +8,7 @@ import type { HomePaths } from "./home.ts";
 import type { ChatQueue } from "./chat-queue.ts";
 import type { Mcp, McpState } from "./mcp.ts";
 import { listReminders } from "./reminders.ts";
+import { secretsHidden } from "./sandbox.ts";
 import { reconcileSkills } from "./skills.ts";
 import { activeModel, patchState, readState } from "./state.ts";
 import { dayjs } from "./time.ts";
@@ -42,9 +44,13 @@ const COMMANDS: Record<string, Command> = {
       const cfg = getConfig();
       const name = activeModel(cfg, readState(paths));
       const last = lastRunAt(paths);
-      const skills = await (await mastra.getAgent(agentId).getWorkspace())?.skills?.list();
+      const workspace = await mastra.getAgent(agentId).getWorkspace();
+      const skills = await workspace?.skills?.list();
+      const sandbox = workspace?.sandbox as LocalSandbox | undefined;
+      const hidden = sandbox && (await secretsHidden(sandbox, paths));
       return lines(
         `Model: ${name} (${cfg.models[name]!.id})`,
+        `Sandbox: ${sandbox?.isolation ?? "none"}, secrets ${hidden === undefined ? "unchecked" : hidden ? "hidden" : "READABLE"}`,
         `Skills installed: ${size(skills)}`,
         mcpLine(c.mcp.state()),
         `Reminders: ${size(await listReminders(mastra.schedules, agentId))}`,

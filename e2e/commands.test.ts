@@ -47,6 +47,7 @@ describe("slash commands (built server, fake Telegram, fake model)", () => {
     await waitFor(() => eigen!.llm.requests.length === 1);
     eigen.tg.say("/status");
     await waitFor(replied("Model: local"), 3000);
+    expect(eigen.tg.sent().join("\n")).toContain("Sandbox: none, secrets READABLE");
     expect(replied("slow answer")()).toBe(false);
   });
 
