@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "mastra build && vitest run --config vitest.e2e.config.ts",
-    "test:live": "vitest run --config vitest.live.config.ts"
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "service": "node scripts/service.ts"
   },
   "dependencies": {
     "@chat-adapter/telegram": "4.41.1",

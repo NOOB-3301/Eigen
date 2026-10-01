@@ -19,7 +19,7 @@ export async function waitFor(check: () => boolean, ms = 30_000) {
 }
 
 /** The built server (.mastra/output) wired to a fake Telegram and a scripted fake model. */
-export async function startEigen(turns: Turn[], config: Record<string, unknown> = {}, port = 4199) {
+export async function startEigen(turns: Turn[], config: Record<string, unknown> = {}, { port = 4199, service = false } = {}) {
   const tg = await fakeTelegram();
   const llm = await fakeLlm(turns);
   const p = homePaths(mkdtempSync(join(tmpdir(), "eigen-e2e-")));
@@ -31,10 +31,12 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   cfg.curatorModel = "local";
   writeFileSync(p.configFile, JSON.stringify(cfg));
 
-  const proc = spawn("node", [join(ROOT, ".mastra/output/index.mjs")], {
-    env: { ...process.env, EIGEN_HOME: p.home, EIGEN_PORT: String(port), TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_API_BASE_URL: tg.url },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const env = { ...process.env, EIGEN_HOME: p.home, EIGEN_PORT: String(port), TELEGRAM_API_BASE_URL: tg.url };
+  // service: start the way the launchd plist does, with the token only in ~/.eigen/.env
+  if (service) writeFileSync(p.envFile, "TELEGRAM_BOT_TOKEN=123:abc\n");
+  const proc = service
+    ? spawn(process.execPath, [join(ROOT, "node_modules/mastra/dist/index.js"), "start", "--env", p.envFile], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] })
+    : spawn("node", [join(ROOT, ".mastra/output/index.mjs")], { env: { ...env, TELEGRAM_BOT_TOKEN: "123:abc" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stdout.on("data", (d) => (log += d));
   proc.stderr.on("data", (d) => (log += d));

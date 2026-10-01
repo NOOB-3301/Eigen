@@ -83,7 +83,7 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   reload: {
-    help: "re-read config.json and skills",
+    help: "re-read models, timezone and skills",
     run: async ({ paths, mastra, agentId }) => {
       reloadConfig();
       const { fixed, quarantined } = reconcileSkills(paths);
@@ -93,7 +93,7 @@ const COMMANDS: Record<string, Command> = {
         `Reloaded. Skills: ${size(await workspace?.skills?.list())}.`,
         ...map(fixed, (f) => `Adjusted ${f}`),
         ...map(quarantined, (q) => `Rejected ${q.skill}: ${q.reason}`),
-        "Telegram settings need a restart.",
+        "Sandbox, memory, limits and Telegram settings need a restart.",
       );
     },
   },
