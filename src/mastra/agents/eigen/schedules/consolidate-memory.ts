@@ -2,7 +2,7 @@ import { defineSchedule } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
 import { getConfig } from "../../../lib/config.ts";
 import { runConsolidation } from "../../../lib/consolidate.ts";
-import { pruneOneShots } from "../../../lib/reminders.ts";
+import { pruneOneShots } from "../../../lib/tools/schedule.ts";
 
 const { timezone, memory } = getConfig();
 

@@ -6,9 +6,10 @@ import { getConfig, reloadConfig } from "./config.ts";
 import { lastRunAt, runConsolidation } from "./consolidate.ts";
 import type { HomePaths } from "./home.ts";
 import type { ChatQueue } from "./chat-queue.ts";
-import type { Mcp, McpState } from "./mcp.ts";
-import { listReminders } from "./reminders.ts";
+import type { Mcp, McpState } from "./tools/mcp.ts";
+import { listReminders } from "./tools/schedule.ts";
 import { secretsHidden } from "./sandbox.ts";
+import { refreshSkillEnv } from "./sandbox.ts";
 import { reconcileSkills } from "./skills.ts";
 import { activeModel, patchState, readState } from "./state.ts";
 import { dayjs } from "./time.ts";
@@ -89,8 +90,9 @@ const COMMANDS: Record<string, Command> = {
       const { fixed, quarantined } = reconcileSkills(paths);
       const workspace = await mastra.getAgent(agentId).getWorkspace();
       await workspace?.skills?.refresh();
+      const keys = workspace?.sandbox ? refreshSkillEnv(workspace.sandbox, paths) : [];
       return lines(
-        `Reloaded. Skills: ${size(await workspace?.skills?.list())}.`,
+        `Reloaded. Skills: ${size(await workspace?.skills?.list())}. Skill env vars: ${keys.length}.`,
         ...map(fixed, (f) => `Adjusted ${f}`),
         ...map(quarantined, (q) => `Rejected ${q.skill}: ${q.reason}`),
         "Sandbox, memory, limits and Telegram settings need a restart.",

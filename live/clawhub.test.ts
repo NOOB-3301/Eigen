@@ -7,7 +7,7 @@ import { LocalSandbox } from "@mastra/core/workspace";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/mastra/lib/config.ts";
 import { CLAWHUB_VERSION } from "../src/mastra/lib/skills.ts";
-import { makeWorkspace } from "../src/mastra/lib/workspace.ts";
+import { makeWorkspace } from "../src/mastra/lib/tools/workspace.ts";
 import { fakeLlm } from "../test/helpers/fake-llm.ts";
 import { tmpHome } from "../test/helpers/home.ts";
 

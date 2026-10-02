@@ -6,7 +6,7 @@ import { LibSQLStore } from "@mastra/libsql";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/mastra/lib/config.ts";
 import type { HomePaths } from "../src/mastra/lib/home.ts";
-import { makeWorkspace } from "../src/mastra/lib/workspace.ts";
+import { makeWorkspace } from "../src/mastra/lib/tools/workspace.ts";
 import { fakeLlm, type Turn } from "./helpers/fake-llm.ts";
 import { tmpHome } from "./helpers/home.ts";
 

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/mastra/lib/config.ts";
 import { buildInstructions } from "../src/mastra/lib/instructions.ts";
 import { CLAWHUB_VERSION, reconcileSkills, reportFile } from "../src/mastra/lib/skills.ts";
-import { makeWorkspace } from "../src/mastra/lib/workspace.ts";
+import { makeWorkspace } from "../src/mastra/lib/tools/workspace.ts";
 import { fakeLlm, type Turn } from "./helpers/fake-llm.ts";
 import { tmpHome } from "./helpers/home.ts";
 

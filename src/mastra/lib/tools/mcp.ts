@@ -1,6 +1,6 @@
 import { MCPClient } from "@mastra/mcp";
 import { isEmpty, mapValues, omitBy } from "lodash-es";
-import { isRemote, resolveEnvRefs, type Config, type McpServer } from "./config.ts";
+import { isRemote, resolveEnvRefs, type Config, type McpServer } from "../config.ts";
 
 type Tools = Awaited<ReturnType<MCPClient["listTools"]>>;
 export type McpState = { tools: Tools; errors: Record<string, string>; servers: string[] };

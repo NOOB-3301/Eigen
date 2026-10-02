@@ -1,11 +1,12 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { needsApproval } from "../src/mastra/lib/approval.ts";
+import { needsApproval } from "../src/mastra/lib/tools/approval.ts";
 import { appendAudit } from "../src/mastra/lib/audit.ts";
 import { loadConfig } from "../src/mastra/lib/config.ts";
 import { hasSecret, redact } from "../src/mastra/lib/secrets.ts";
-import { resolveIsolation, sandboxEnv } from "../src/mastra/lib/sandbox.ts";
-import { vetCall } from "../src/mastra/lib/workspace.ts";
+import { makeSandbox, parseEnvFile, refreshSkillEnv, resolveIsolation, sandboxEnv } from "../src/mastra/lib/sandbox.ts";
+import { touchesSkillEnv, vetCall } from "../src/mastra/lib/tools/workspace.ts";
 import { tmpHome } from "./helpers/home.ts";
 
 const bash = (input: Record<string, unknown>) => ({ workspaceToolName: "mastra_workspace_execute_command", input });
@@ -81,4 +82,37 @@ describe("vetCall", () => {
     expect(vetCall(p, cfg, bash({ command: "x", cwd: "/etc" }))).toMatch(/inside the sandbox/);
     expect(vetCall(p, cfg, bash({ command: "x", cwd: "sub/dir", timeout: 60 }))).toBeUndefined();
   });
+});
+
+describe("skill env", () => {
+  it("parses KEY=value lines and drops names that change how processes start", () => {
+    const env = parseEnvFile(`# c\nFIRECRAWL_API_KEY=fc-1\nexport TOKEN="a b"\nPATH=/evil\nLD_PRELOAD=x\nNODE_OPTIONS=--x\nbad-name=1\nQ='z'\n`);
+    expect(env).toEqual({ FIRECRAWL_API_KEY: "fc-1", TOKEN: "a b", Q: "z" });
+  });
+
+  it("applies to the next command without a restart, and the sandbox's own variables win", () => {
+    const p = tmpHome();
+    const cfg = loadConfig(p.configFile);
+    const sandbox = makeSandbox(p, cfg, "none");
+    const built = () => (sandbox as unknown as { buildEnv: (e?: object) => Record<string, string> }).buildEnv();
+    expect(built().FIRECRAWL_API_KEY).toBeUndefined();
+
+    writeFileSync(join(p.sandboxDir, ".env"), "FIRECRAWL_API_KEY=fc-1\nHOME=/evil\n");
+    expect(refreshSkillEnv(sandbox, p)).toEqual(["FIRECRAWL_API_KEY"]);
+    expect(built().FIRECRAWL_API_KEY).toBe("fc-1");
+    expect(built().HOME).toBe(p.sandboxHomeDir);
+
+    writeFileSync(join(p.sandboxDir, ".env"), "");
+    refreshSkillEnv(sandbox, p);
+    expect(built().FIRECRAWL_API_KEY).toBeUndefined();
+  });
+});
+
+describe("touchesSkillEnv", () => {
+  it.each([
+    [{ workspaceToolName: "mastra_workspace_write_file", input: { path: ".env" } }, true],
+    [{ workspaceToolName: "mastra_workspace_execute_command", input: { command: "echo K=v > .env" } }, true],
+    [{ workspaceToolName: "mastra_workspace_write_file", input: { path: "notes.md" } }, false],
+    [{ workspaceToolName: "mastra_workspace_execute_command", input: { command: "ls" } }, false],
+  ])("%j -> %s", (call, expected) => expect(touchesSkillEnv(call)).toBe(expected));
 });

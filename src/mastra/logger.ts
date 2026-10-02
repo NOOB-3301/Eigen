@@ -8,6 +8,7 @@ appendFileSync(logFile, ""); // FileTransport throws if the file doesn't exist
 
 export default new PinoLogger({
   name: "eigen",
-  level: (process.env.EIGEN_LOG_LEVEL as "debug" | "info" | "warn" | "error" | undefined) ?? "info",
+  // level: (process.env.EIGEN_LOG_LEVEL as "debug" | "info" | "warn" | "error" | undefined) ?? "info",
+  level: "debug",
   transports: { file: new FileTransport({ path: logFile }) },
 });

@@ -28,6 +28,12 @@ describe("instructions", () => {
     expect(buildInstructions(p, "UTC", at)).toContain("You are eigen");
   });
 
+  it("tells the agent to finish its work and never end a turn on a promise, with the clock still last", () => {
+    const text = buildInstructions(tmpHome(), "Asia/Kolkata", at);
+    expect(text).toMatch(/<finishing>[\s\S]*Never end a turn by saying you will do something[\s\S]*every task you were given is complete[\s\S]*<\/finishing>/);
+    expect(text.indexOf("<finishing>")).toBeLessThan(text.indexOf("Current time:"));
+  });
+
   it("caps injected memory", () => {
     const p = tmpHome();
     writeFileSync(`${p.memoryDir}/projects.md`, "x".repeat(50_000));

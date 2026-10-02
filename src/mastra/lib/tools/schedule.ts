@@ -2,8 +2,8 @@ import type { AgentSchedule, Schedules } from "@mastra/core/schedules";
 import { createTool } from "@mastra/core/tools";
 import { filter, map, truncate } from "lodash-es";
 import { z } from "zod";
-import { getConfig } from "./config.ts";
-import { dayjs } from "./time.ts";
+import { getConfig } from "../config.ts";
+import { dayjs } from "../time.ts";
 
 const SOURCE = "reminder";
 const fail = (error: string) => ({ error });

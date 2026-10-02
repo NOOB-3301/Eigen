@@ -7,8 +7,9 @@ import { makeChatQueue } from "../../lib/chat-queue.ts";
 import { slashHandler } from "../../lib/commands.ts";
 import { getConfig, toMastraModel, tokenBudget } from "../../lib/config.ts";
 import { readyPaths } from "../../lib/home.ts";
-import { makeMcp } from "../../lib/mcp.ts";
-import { makeScheduleTool } from "../../lib/reminders.ts";
+import { mergeSystemProcessor } from "../../lib/merge-system.ts";
+import { makeMcp } from "../../lib/tools/mcp.ts";
+import { makeScheduleTool } from "../../lib/tools/schedule.ts";
 import { activeModel, readState } from "../../lib/state.ts";
 
 const config = await boot();
@@ -24,12 +25,15 @@ const telegram = createTelegramAdapter({
   botToken: process.env[config.telegram.tokenEnv],
   allowedUserIds: config.telegram.allowedUserIds,
   mode: "polling",
+  // Without this Telegram keeps whatever allowed_updates an earlier getUpdates set, and Approve/Deny taps (callback_query) never arrive.
+  longPolling: { allowedUpdates: ["message", "edited_message", "callback_query"] },
 });
 
 export default agentConfig({
   model: () => toMastraModel(model()),
   defaultOptions: { maxSteps: config.limits.maxSteps },
-  inputProcessors: () => ((budget) => (budget ? [new TokenLimiterProcessor({ limit: budget })] : []))(tokenBudget(model())),
+  inputProcessors: () =>
+    ((m) => [...(tokenBudget(m) ? [new TokenLimiterProcessor({ limit: tokenBudget(m) as number })] : []), ...(m.url ? [mergeSystemProcessor] : [])])(model()),
   tools: () => ({ ...mcp.tools(), schedule: scheduleTool }),
   channels: {
     adapters: {

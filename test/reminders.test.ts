@@ -3,7 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { describe, expect, it } from "vitest";
-import { makeScheduleTool, pruneOneShots } from "../src/mastra/lib/reminders.ts";
+import { makeScheduleTool, pruneOneShots } from "../src/mastra/lib/tools/schedule.ts";
 import { tmpHome } from "./helpers/home.ts";
 
 function setup() {

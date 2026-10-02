@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { Agent } from "@mastra/core/agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseConfig, type Config } from "../src/mastra/lib/config.ts";
-import { makeMcp } from "../src/mastra/lib/mcp.ts";
+import { makeMcp } from "../src/mastra/lib/tools/mcp.ts";
 import { fakeLlm } from "./helpers/fake-llm.ts";
 
 const SERVER = join(import.meta.dirname, "helpers/mcp-server.ts");

@@ -16,14 +16,14 @@ export const WORKING_MEMORY_TEMPLATE = `# About the user
 export function makeMemory(p: HomePaths, cfg: Config) {
   const { semanticRecall: sr, embedder, lastMessages } = cfg.memory;
   return new Memory({
-    ...(sr.enabled && {
-      vector: new LibSQLVector({ id: "eigen-vector", url: `file:${p.dbFile}` }),
-      embedder: new ModelRouterEmbeddingModel(toMastraModel(embedder)),
-    }),
+    // ...(sr.enabled && {
+    //   vector: new LibSQLVector({ id: "eigen-vector", url: `file:${p.dbFile}` }),
+    //   embedder: new ModelRouterEmbeddingModel(toMastraModel(embedder)),
+    // }),
     options: {
       lastMessages,
       workingMemory: { enabled: true, scope: "resource", template: WORKING_MEMORY_TEMPLATE },
-      semanticRecall: sr.enabled && { topK: sr.topK, messageRange: sr.messageRange, scope: "resource" },
+      // semanticRecall: sr.enabled && { topK: sr.topK, messageRange: sr.messageRange, scope: "resource" },
     },
   });
 }

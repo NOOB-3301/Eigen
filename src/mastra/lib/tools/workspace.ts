@@ -1,11 +1,11 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { LocalFilesystem, Workspace, WORKSPACE_TOOLS } from "@mastra/core/workspace";
+import { appendAudit } from "../audit.ts";
+import type { Config } from "../config.ts";
+import type { HomePaths } from "../home.ts";
+import { makeSandbox, refreshSkillEnv, resolveIsolation } from "../sandbox.ts";
+import { reconcileSkills } from "../skills.ts";
 import { needsApproval } from "./approval.ts";
-import { appendAudit } from "./audit.ts";
-import type { Config } from "./config.ts";
-import type { HomePaths } from "./home.ts";
-import { makeSandbox, resolveIsolation } from "./sandbox.ts";
-import { reconcileSkills } from "./skills.ts";
 
 const { FILESYSTEM: FS, SANDBOX } = WORKSPACE_TOOLS;
 
@@ -22,6 +22,12 @@ export const touchesSkills = ({ workspaceToolName, input }: Call) =>
     ? /\bclawhub\b/.test(String(input.command ?? ""))
     : ([FS.WRITE_FILE, FS.EDIT_FILE] as string[]).includes(workspaceToolName) && /^\/?skills\//.test(String(input.path ?? ""));
 
+/** Writes and shell commands that can change the sandbox's .env, where the agent keeps its skills' keys. */
+export const touchesSkillEnv = ({ workspaceToolName, input }: Call) =>
+  workspaceToolName === SANDBOX.EXECUTE_COMMAND
+    ? /(^|[\s>/])\.env\b/.test(String(input.command ?? ""))
+    : ([FS.WRITE_FILE, FS.EDIT_FILE] as string[]).includes(workspaceToolName) && /^\/?\.env$/.test(String(input.path ?? ""));
+
 /** Returns a reason to refuse a bash call, or undefined to allow it. */
 export function vetCall(p: HomePaths, cfg: Config, { workspaceToolName, input }: Call) {
   if (workspaceToolName !== SANDBOX.EXECUTE_COMMAND) return undefined;
@@ -33,11 +39,12 @@ export function vetCall(p: HomePaths, cfg: Config, { workspaceToolName, input }:
 
 export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsolation(cfg.sandbox.isolation)) {
   const audit = (entry: Record<string, unknown>) => appendAudit(p.auditFile, entry);
+  const sandbox = makeSandbox(p, cfg, isolation);
   const workspace: Workspace = new Workspace({
     id: "eigen",
     name: "eigen",
     filesystem: new LocalFilesystem({ basePath: p.sandboxDir }),
-    sandbox: makeSandbox(p, cfg, isolation),
+    sandbox,
     // Your skills/ plus the agent's sandbox/skills/, read-only; "**" also finds ClawHub's skills/@owner/slug layout.
     skillSource: new LocalFilesystem({ basePath: p.home, readOnly: true }),
     skills: ["skills/**/SKILL.md", "sandbox/skills/**/SKILL.md"],
@@ -61,9 +68,13 @@ export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsol
         },
         afterToolCall: async ({ toolName, workspaceToolName, input, error }) => {
           audit({ tool: toolName, input, outcome: error ? "error" : "ok", error: error && String(error) });
-          if (error || !touchesSkills({ workspaceToolName, input: input as Record<string, unknown> })) return;
+          if (error) return;
+          const call = { workspaceToolName, input: input as Record<string, unknown> };
+          if (touchesSkillEnv(call)) refreshSkillEnv(sandbox, p);
+          if (!touchesSkills(call)) return;
           reconcileSkills(p);
           await workspace.skills?.refresh(); // don't wait for Mastra's 30 s staleness check
+          refreshSkillEnv(sandbox, p);
         },
       },
     },

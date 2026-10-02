@@ -7,6 +7,16 @@ import { clockLine } from "./time.ts";
 
 export const MEMORY_FILES = ["MEMORY.md", "profile.md", "projects.md", "people.md", "lessons.md"];
 const MEMORY_MAX_CHARS = 24_000;
+const SECRETS_RULE = [
+  "API keys and tokens for skills go in .env in your working directory (the sandbox root), one NAME=value per line. Skills read them as environment variables, so the next command sees a new key with no restart.",
+  "To add one: run `printf '\\n%s=%s\\n' NAME 'value' >> .env` (the leading newline stops it joining the previous line), or use the write tool with every variable on its own line, ending in a newline. To change one, edit its line; do not append a duplicate.",
+  "Never put a key in working memory, memory files, notes or scripts, and never repeat one back to the user: say only its name. In scripts, read it from the environment.",
+].join("\n");
+const FINISH_RULE = [
+  "Finish what you start. Never end a turn by saying you will do something: if you write \"I'll check\", \"I'll reply\", \"let me\" or \"I'll continue\", make that tool call in the same turn instead of writing the sentence.",
+  "Keep calling tools until every question in the message is answered and every task you were given is complete. If there are several items (notifications, comments, files, steps), work through all of them, one after another, before you reply. A text-only reply ends your turn, so send one only when the work is done or you are blocked and need the user.",
+  "In your final reply, say what you did and what the results were. If something could not be done, say exactly what failed and why.",
+].join("\n");
 const FALLBACK = "You are eigen, a personal assistant. Be concise.";
 
 export const readText = (file: string) => {
@@ -32,5 +42,7 @@ export const buildInstructions = (p: HomePaths, zone: string, at?: Date) =>
     tag("soul", readText(p.soulFile)),
     tag("memory", memoryBlock(p.memoryDir)),
     tag("skill_notes", readText(reportFile(p))),
+    tag("secrets", SECRETS_RULE),
+    tag("finishing", FINISH_RULE),
     clockLine(zone, at),
   ]).join("\n\n");

@@ -21,7 +21,7 @@ npm run setup        # creates ~/.eigen with defaults
 3. For the default local model: `ollama pull gemma4:e4b` and `ollama pull nomic-embed-text`, and run Ollama with a context length of at least `models.local.contextWindow` (28000).
 4. `npm start` (builds, then runs on `127.0.0.1:4111`).
 
-To run it as a background service: `npm run build && npm run service`, then run the `launchctl bootstrap` line it prints.
+To run it as a background service: `npm run build && npm run service`, then run the `launchctl bootstrap` line it prints. The build bundles Mastra Studio, served at http://127.0.0.1:4111 (localhost only, no auth).
 
 ## Talking to it
 
@@ -100,10 +100,10 @@ npm run typecheck
 npm test            # unit tests, offline
 npm run test:e2e    # builds, then drives the built server through a fake Telegram and a fake model
 npm run test:live   # real ClawHub install through the agent (needs network)
-npm run dev         # Mastra Studio, using ~/.eigen/.env
+npm run dev         # Mastra Studio (hot reload), using ~/.eigen/.env
 ```
 
-Layout: `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `memory.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them. `workspace.ts` is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a one-file change.
+Layout: `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `memory.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them, and `lib/tools/` holds the tools (`schedule.ts`, `mcp.ts`, `approval.ts`, and `workspace.ts` for `read`/`write`/`edit`/`bash`). Tools live there, not in `agents/eigen/tools/`, because Mastra ignores discovered tool files when `config.tools` is a function (MCP tools load at runtime). `lib/tools/workspace.ts` (with `lib/sandbox.ts`) is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a small change.
 
 ## Known limits
 
