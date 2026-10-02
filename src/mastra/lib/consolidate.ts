@@ -70,5 +70,6 @@ export const runConsolidation = (mastra: Mastra) =>
     paths: readyPaths(),
     zone: getConfig().timezone,
     rows: (since) => messagesSince(mastra.getStorage()!, since),
-    curate: async (prompt) => (await mastra.getAgent("curator").generate(prompt, { structuredOutput: { schema: UpdateSchema } })).object as Update,
+    // Prompt injection, not the provider's native JSON format: some hosted open models (gpt-oss on ollama-cloud) answer in prose when asked for a response schema.
+    curate: async (prompt) => (await mastra.getAgent("curator").generate(prompt, { structuredOutput: { schema: UpdateSchema, jsonPromptInjection: true } })).object as Update,
   });
