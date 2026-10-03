@@ -12,6 +12,10 @@ const SECRETS_RULE = [
   "To add one: run `printf '\\n%s=%s\\n' NAME 'value' >> .env` (the leading newline stops it joining the previous line), or use the write tool with every variable on its own line, ending in a newline. To change one, edit its line; do not append a duplicate.",
   "Never put a key in working memory, memory files, notes or scripts, and never repeat one back to the user: say only its name. In scripts, read it from the environment.",
 ].join("\n");
+const MEMORY_RULE = [
+  "Working memory holds small, stable facts about the user. Before updating it, read the current <working_memory_data> block and change only what changed: keep every other section and line as it is. Never rebuild it from scratch and never replace content with a placeholder such as \"unchanged\" or \"other rules\".",
+  "Do not put logs, per-task progress or copied web text in working memory. Older conversation is not lost: use the recall tool, when you have one, to look it up instead of guessing.",
+].join("\n");
 const FINISH_RULE = [
   "Finish what you start. Never end a turn by saying you will do something: if you write \"I'll check\", \"I'll reply\", \"let me\" or \"I'll continue\", make that tool call in the same turn instead of writing the sentence.",
   "Keep calling tools until every question in the message is answered and every task you were given is complete. If there are several items (notifications, comments, files, steps), work through all of them, one after another, before you reply. A text-only reply ends your turn, so send one only when the work is done or you are blocked and need the user.",
@@ -43,6 +47,7 @@ export const buildInstructions = (p: HomePaths, zone: string, at?: Date) =>
     tag("memory", memoryBlock(p.memoryDir)),
     tag("skill_notes", readText(reportFile(p))),
     tag("secrets", SECRETS_RULE),
+    tag("memory_rules", MEMORY_RULE),
     tag("finishing", FINISH_RULE),
     clockLine(zone, at),
   ]).join("\n\n");

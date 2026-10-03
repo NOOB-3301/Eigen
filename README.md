@@ -56,6 +56,8 @@ Messages sent while it is working are queued and answered in order. Risky action
 
 **Memory.** Working memory is the instant "remember this" path. `~/.eigen/memory` is written only by a nightly job (03:30 in your timezone, `memory.consolidationCron`) and by you: it reads the day's conversations, checks size and secrets, writes the notes, and commits. No agent tool can reach that folder. Notes are loaded into every prompt; the timeline is searched through semantic recall.
 
+**Growing memory (optional, off by default).** Mastra can also learn in the background. `memory.observational.enabled` turns on Observational Memory: when a chat passes `messageTokens`, an Observer agent condenses old turns into notes and a Reflector keeps them short; with `retrieval` the agent gets a `recall` tool to look up older messages. `memory.knowledge.enabled` (needs observational, experimental in Mastra) adds a curate agent that keeps durable facts and a few pinned lines delivered every turn. Pick the background model with `memory.observational.model` (a name from `models`; default is `curatorModel`). Skill text, scheduled runs (Moltbook, Zomato) and anything that looks like a key are removed before the Observer sees them. Everything is stored in `eigen.db`; look at it in Studio's Memory tab. Turn it off again by setting the flags to `false` and restarting.
+
 **MCP.** In `config.json`:
 
 ```json
@@ -88,7 +90,7 @@ Messages sent while it is working are queued and answered in order. Risky action
 | `timezone` | system | used for the clock line and schedules |
 | `limits.maxSteps` | 25 | tool steps per message |
 | `sandbox.*` | see above | `isolation`, `allowNetwork`, `readWritePaths`, `readOnlyPaths`, `denyReadPaths`, `commandTimeoutMs`, `maxTimeoutSec` |
-| `memory.*` | | `lastMessages`, `semanticRecall`, `embedder`, `consolidationCron` |
+| `memory.*` | | `lastMessages`, `semanticRecall`, `embedder`, `consolidationCron`, `observational`, `knowledge` |
 | `mcpServers`, `mcp` | none | see above |
 
 `/reload` picks up `models`, `defaultModel` and `timezone`; MCP has `/reload_mcp`. Anything else in `config.json`, and `.env`, needs a restart.

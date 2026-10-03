@@ -55,13 +55,36 @@ export const ConfigSchema = z
           .prefault({}),
         embedder: Model.pick({ id: true, url: true, apiKeyEnv: true }).prefault({ id: "ollama/nomic-embed-text", url: "http://localhost:11434/v1" }),
         consolidationCron: z.string().default("30 3 * * *"),
+        /** Mastra Observational Memory: background Observer/Reflector agents compress old turns into observations. Off until enabled. */
+        observational: z
+          .object({
+            enabled: z.boolean().default(false),
+            model: z.string().optional(),
+            messageTokens: posInt.default(8000),
+            reflectionTokens: posInt.default(20_000),
+            activateAfterIdle: z.string().default("30m"),
+            retrieval: z.boolean().default(true),
+          })
+          .prefault({}),
+        /** Mastra's experimental Subconscious: a curate agent keeps durable knowledge and pins that are delivered every turn. Needs observational. */
+        knowledge: z
+          .object({
+            enabled: z.boolean().default(false),
+            pins: z.boolean().default(true),
+            tools: z.boolean().default(true),
+            maxPins: posInt.default(20),
+            maxCharacters: posInt.default(2000),
+          })
+          .prefault({}),
       })
       .prefault({}),
     mcpServers: z.record(z.string(), z.union([Stdio, Remote])).default({}),
     mcp: z.object({ enabled: z.boolean().default(true), startupTimeoutMs: posInt.default(20_000) }).prefault({}),
   })
   .refine((c) => c.defaultModel in c.models, { path: ["defaultModel"], message: "must name an entry in models" })
-  .refine((c) => !c.curatorModel || c.curatorModel in c.models, { path: ["curatorModel"], message: "must name an entry in models" });
+  .refine((c) => !c.curatorModel || c.curatorModel in c.models, { path: ["curatorModel"], message: "must name an entry in models" })
+  .refine((c) => !c.memory.observational.model || c.memory.observational.model in c.models, { path: ["memory", "observational", "model"], message: "must name an entry in models" })
+  .refine((c) => !c.memory.knowledge.enabled || c.memory.observational.enabled, { path: ["memory", "knowledge", "enabled"], message: "needs memory.observational.enabled" });
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type ModelEntry = z.infer<typeof Model>;
