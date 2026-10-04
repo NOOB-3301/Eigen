@@ -1,35 +1,39 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { AgentId, UpdateAgentConfigRequest } from "@eigen/engine/schema";
+import { writeAgent } from "@eigen/engine/store";
+import { agentDetail } from "@/lib/server/fleet";
+import { paths, rootConfig } from "@/lib/server/home";
+import { failure, guard, json, readBody } from "@/lib/server/http";
 
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
+export const dynamic = "force-dynamic";
 
+const badId = () => json({ ok: false, issues: ["id: must be a lowercase slug"] }, 400);
+
+/** Same body as GET /api/agents/:id (the editor's view of the files). */
+export async function GET(req: Request, ctx: RouteContext<"/api/agents/[id]/config">) {
+  const blocked = guard(req);
+  if (blocked) return blocked;
+  const { id } = await ctx.params;
+  if (!AgentId.safeParse(id).success) return badId();
   try {
-    const body = await req.json();
+    const detail = await agentDetail(id);
+    return detail ? json(detail) : json({ ok: false, issues: [`no agent "${id}"`] }, 404);
+  } catch (e) {
+    return failure(e);
+  }
+}
 
-    const res = await fetch(`http://127.0.0.1:4111/api/agents/${id}/config`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `Failed to update agent ${id}` },
-        { status: res.status }
-      );
-    }
-
-    const updated = await res.json();
-    return NextResponse.json(updated);
-  } catch (error) {
-    return NextResponse.json(
-      { error: 'Failed to update agent config', details: String(error) },
-      { status: 500 }
-    );
+/** UpdateAgentConfigRequest -> UpdateAgentConfigResponse (200 / 400 issues / 404 / 409 etag). */
+export async function POST(req: Request, ctx: RouteContext<"/api/agents/[id]/config">) {
+  const blocked = guard(req);
+  if (blocked) return blocked;
+  const { id } = await ctx.params;
+  if (!AgentId.safeParse(id).success) return badId();
+  const body = await readBody(req, UpdateAgentConfigRequest);
+  if ("error" in body) return body.error;
+  try {
+    const r = writeAgent(paths(), rootConfig(), id, body.data);
+    return json(r.body, r.status);
+  } catch (e) {
+    return failure(e);
   }
 }

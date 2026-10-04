@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -p 4100",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:security": "node scripts/security-check.mjs"
   },
   "dependencies": {
     "@eigen/engine": "*",
@@ -20,7 +21,8 @@
     "react-dom": "19.2.8",
     "sonner": "^2.0.8",
     "swr": "^2.5.1",
-    "tailwind-merge": "^3.7.0"
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -1,28 +1,33 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { z } from "zod";
+import { createAgent } from "@eigen/engine/store";
+import type { AgentConfigInput } from "@eigen/engine/schema";
+import { fleet } from "@/lib/server/fleet";
+import { paths, rootConfig } from "@/lib/server/home";
+import { failure, guard, json, readBody } from "@/lib/server/http";
 
-/**
- * GET /api/agents
- * List all discovered agents with their metadata
- */
-export async function GET(req: NextRequest) {
+export const dynamic = "force-dynamic";
+
+/** Engine snapshot when reachable, else computed from the agent files with every status "offline". */
+export async function GET(req: Request) {
+  const blocked = guard(req);
+  if (blocked) return blocked;
+  return json(await fleet());
+}
+
+const CreateAgentRequest = z.object({
+  config: z.record(z.string(), z.unknown()),
+  instructionsText: z.string().max(200_000).optional(),
+});
+
+export async function POST(req: Request) {
+  const blocked = guard(req);
+  if (blocked) return blocked;
+  const body = await readBody(req, CreateAgentRequest);
+  if ("error" in body) return body.error;
   try {
-    // Call engine API (running on port 4111) to get agents
-    const res = await fetch('http://127.0.0.1:4111/api/agents', {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (!res.ok) {
-      return NextResponse.json({ error: 'Engine unavailable' }, { status: 503 });
-    }
-
-    const agents = await res.json();
-    return NextResponse.json(agents);
-  } catch (error) {
-    return NextResponse.json(
-      { error: 'Failed to fetch agents', details: String(error) },
-      { status: 500 }
-    );
+    const r = createAgent(paths(), rootConfig(), body.data.config as AgentConfigInput, body.data.instructionsText);
+    return json(r.body, r.status);
+  } catch (e) {
+    return failure(e);
   }
 }
