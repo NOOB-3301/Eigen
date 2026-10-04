@@ -15,6 +15,10 @@ export function homePaths(home = eigenHome()) {
   return {
     home,
     configFile: join(home, "config.json"),
+    /** One folder per agent: .agents/<id>/{config.json, instructions.md, sandbox/?}. */
+    agentsDir: join(home, ".agents"),
+    /** React Flow node positions; kept out of agent configs so dragging a node never reloads an agent. */
+    topologyLayoutFile: join(dataDir, "topology-layout.json"),
     envFile: join(home, ".env"),
     soulFile: join(home, "SOUL.md"),
     systemPromptFile: join(home, "prompts", "system.md"),
@@ -35,7 +39,7 @@ export function homePaths(home = eigenHome()) {
 }
 
 export function ensureDirs(p: HomePaths) {
-  const dirs = [p.home, p.userSkillsDir, p.sandboxSkillsDir, join(p.sandboxHomeDir, "tmp"), p.memoryDir, p.dataDir, p.logsDir, dirname(p.systemPromptFile)];
+  const dirs = [p.home, p.agentsDir, p.userSkillsDir, p.sandboxSkillsDir, join(p.sandboxHomeDir, "tmp"), p.memoryDir, p.dataDir, p.logsDir, dirname(p.systemPromptFile)];
   dirs.forEach((d) => mkdirSync(d, { recursive: true }));
 }
 

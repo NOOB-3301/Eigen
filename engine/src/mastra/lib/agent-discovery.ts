@@ -1,7 +1,10 @@
 import { readFileSync, existsSync, readdirSync, watch, FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import { homePaths, type HomePaths } from './home.ts';
+import { homePaths } from './home.ts';
+import type { HomePaths } from './home.ts';
 import { parseAgentConfig, configToMetadata, type AgentConfig, type AgentMetadata } from './agent-schema.ts';
+
+export type { HomePaths };
 
 export interface DiscoveredAgent {
   config: AgentConfig;
