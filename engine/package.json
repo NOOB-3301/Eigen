@@ -41,6 +41,7 @@
   "exports": {
     "./schema": "./src/mastra/lib/schema.ts",
     "./home": "./src/mastra/lib/home.ts",
-    "./store": "./src/mastra/lib/store.ts"
+    "./store": "./src/mastra/lib/store.ts",
+    "./config": "./src/mastra/lib/config.ts"
   }
 }

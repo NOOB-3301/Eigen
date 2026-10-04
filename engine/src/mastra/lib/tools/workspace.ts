@@ -44,12 +44,12 @@ export function vetCall(p: HomePaths, cfg: Config, { workspaceToolName, input }:
   return undefined;
 }
 
-export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsolation(cfg.sandbox.isolation)) {
+export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsolation(cfg.sandbox.isolation), id = "eigen") {
   const audit = (entry: Record<string, unknown>) => appendAudit(p.auditFile, entry);
   const sandbox = makeSandbox(p, cfg, isolation);
   const workspace: Workspace = new Workspace({
-    id: "eigen",
-    name: "eigen",
+    id,
+    name: id,
     filesystem: new LocalFilesystem({ basePath: p.sandboxDir }),
     sandbox,
     // Your skills/ plus the agent's sandbox/skills/, read-only; "**" also finds ClawHub's skills/@owner/slug layout.

@@ -140,8 +140,6 @@ export function agentProblems(a: AgentConfig, root: Config): string[] {
   Object.keys(a.tools.mcp.servers)
     .filter((n) => n in root.mcpServers)
     .forEach((n) => problems.push(`tools.mcp.servers.${n} shadows a root mcpServer; rename it or inherit the root one`));
-  if (a.memory.observational?.enabled && !root.memory.observational.model && !root.models[a.model ?? root.defaultModel])
-    problems.push("memory.observational needs a model");
   return problems;
 }
 
@@ -213,7 +211,7 @@ export function delegationEdges(agents: ResolvedAgent[]): Array<[from: string, t
   for (const src of live)
     for (const dst of live) {
       if (src.id === dst.id || dst.delegation.acceptsFrom === "none") continue;
-      const asked = src.delegation.canDelegateTo.includes(dst.id) || (src.primary && dst.delegation.acceptsFrom !== "none");
+      const asked = src.delegation.canDelegateTo.includes(dst.id) || src.primary;
       const allowed = dst.delegation.acceptsFrom === "any" || (dst.delegation.acceptsFrom === "primary" && src.id === primary?.id);
       if (asked && allowed) edges.push([src.id, dst.id]);
     }
