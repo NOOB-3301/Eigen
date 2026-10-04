@@ -29,6 +29,7 @@
   --cable-routes: #b07d0a;
   --cable-delegates: #0c8f84;
   --cable-uses: #7a8296;
+  --cable-think: #7655d6;
   --tg-polling: #18915a;
   --tg-starting: #4453d6;
   --tg-missing: #b5620e;
@@ -64,6 +65,7 @@
     --cable-routes: #e6b450;
     --cable-delegates: #4fd1c5;
     --cable-uses: #7d8499;
+    --cable-think: #b39bff;
     --tg-polling: #4cd391;
     --tg-starting: #9aa5ff;
     --tg-missing: #f3a54b;
@@ -99,6 +101,7 @@
   --cable-routes: #e6b450;
   --cable-delegates: #4fd1c5;
   --cable-uses: #7d8499;
+  --cable-think: #b39bff;
   --tg-polling: #4cd391;
   --tg-starting: #9aa5ff;
   --tg-missing: #f3a54b;
@@ -133,6 +136,7 @@
   --color-routes: var(--cable-routes);
   --color-delegates: var(--cable-delegates);
   --color-uses: var(--cable-uses);
+  --color-think: var(--cable-think);
   --color-tg-polling: var(--tg-polling);
   --color-tg-starting: var(--tg-starting);
   --color-tg-missing: var(--tg-missing);
@@ -266,4 +270,12 @@
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+}
+
+/* Builder canvas: the layout is derived, so when a slot changes (a trigger is added, a skill folds away) nodes glide to their new place. */
+.builder-flow .react-flow__node {
+  transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.builder-flow .react-flow__edge-path {
+  transition: stroke-opacity 0.2s;
 }

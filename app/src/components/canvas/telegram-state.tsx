@@ -2,8 +2,7 @@
 import type { TelegramRuntime } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 
-/** The env var an agent's own bot token is conventionally stored under: TELEGRAM_BOT_TOKEN_<ID>. Always a valid ENV_NAME for a valid agent id. */
-export const suggestTokenEnv = (id: string) => (id ? `TELEGRAM_BOT_TOKEN_${id.toUpperCase().replace(/-/g, "_")}` : "");
+export { suggestTokenEnv } from "@/lib/client/telegram";
 
 export type TgTone = "polling" | "starting" | "missing" | "error" | "off" | "unknown";
 export type TgView = { tone: TgTone; label: string; detail?: string };

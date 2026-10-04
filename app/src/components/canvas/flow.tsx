@@ -17,6 +17,8 @@ type Props = {
   savedLayout: Layout;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  /** Double-clicking an agent opens its builder. */
+  onOpenBuilder: (id: string) => void;
   /** Width in px covered by the inspector on the right, so focusing centers in the visible area. */
   occludedRight: number;
   /** Width the inspector takes when open (used before it is open, when a click is about to open it). */
@@ -53,7 +55,7 @@ function toNodes(fleet: FleetResponse, positions: Layout, prev: Map<string, Stud
   });
 }
 
-function Flow({ fleet, savedLayout, selectedId, onSelect, occludedRight, drawerWidth, apiRef }: Props) {
+function Flow({ fleet, savedLayout, selectedId, onSelect, onOpenBuilder, occludedRight, drawerWidth, apiRef }: Props) {
   const rf = useReactFlow<StudioNode, CableEdge>();
   const reduce = useReducedMotion();
   const positions = useRef<Layout>({ ...savedLayout });
@@ -176,6 +178,7 @@ function Flow({ fleet, savedLayout, selectedId, onSelect, occludedRight, drawerW
       edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}
       onNodeDragStop={onNodeDragStop}
+      onNodeDoubleClick={(_, n) => n.id.startsWith("agent:") && onOpenBuilder(n.id.slice("agent:".length))}
       onPaneClick={() => onSelect(null)}
       nodesConnectable={false}
       edgesFocusable={false}

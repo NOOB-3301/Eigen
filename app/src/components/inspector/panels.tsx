@@ -26,92 +26,108 @@ export type PanelProps = {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-export function OverviewPanel({ id, root, agents, runtime, resolved, engineOnline, openSettings }: PanelProps) {
+export function IdentitySection() {
+  return (
+    <Section title="Identity">
+      <TextField label="Name" path="name" />
+      <TextField label="Role" path="role" hint="A short label shown on the canvas, like researcher or planner." />
+      <TextField label="Description" path="description" multiline rows={4} hint="The primary reads this to decide when to delegate, so write it for a model." />
+    </Section>
+  );
+}
+
+/** The agent's model: a root model key, or the root default (no key in the file). */
+export function ModelField({ root }: { root?: RootInfo }) {
   const { config, set } = useForm();
   const model = getPath(config, "model") as string | undefined;
+  const defaultModel = root?.models.find((m) => m.key === root.defaultModel);
+  return (
+    <Field
+      label="Model"
+      path="model"
+      aside={
+        <Provenance
+          overridden={model !== undefined}
+          inheritedLabel={root?.defaultModel ?? "default"}
+          onOverride={() => set("model", root?.defaultModel ?? "")}
+          onReset={() => set("model", undefined)}
+        />
+      }
+    >
+      {({ id: fid, describedBy, invalid }) => (
+        <select
+          id={fid}
+          aria-describedby={describedBy}
+          aria-invalid={invalid}
+          value={model ?? ""}
+          onChange={(e) => set("model", e.target.value || undefined)}
+          className={cn(inputCls(invalid), "appearance-none font-mono text-[13px]")}
+        >
+          <option value="">
+            Root default: {root?.defaultModel ?? "…"}
+            {defaultModel ? ` (${defaultModel.id})` : ""}
+          </option>
+          {root?.models.map((m) => (
+            <option key={m.key} value={m.key}>
+              {m.key} ({m.id})
+            </option>
+          ))}
+          {model && root && !root.models.some((m) => m.key === model) && <option value={model}>{model} (missing)</option>}
+        </select>
+      )}
+    </Field>
+  );
+}
+
+export function DelegationSection({ id, agents }: { id: string; agents: AgentSummary[] }) {
+  const { config, set } = useForm();
   const primary = getPath(config, "primary") === true;
   const acceptsFrom = (getPath(config, "delegation.acceptsFrom") as string | undefined) ?? "primary";
   const canDelegateTo = (getPath(config, "delegation.canDelegateTo") as string[] | undefined) ?? [];
   const others = agents.filter((a) => a.id !== id);
-  const defaultModel = root?.models.find((m) => m.key === root.defaultModel);
+  return (
+    <Section title="Delegation" hint="Who can hand work to this agent, and who it can hand work to.">
+      <Field label="Accepts work from" path="delegation.acceptsFrom">
+        {() => (
+          <Segmented
+            label="Accepts work from"
+            value={acceptsFrom}
+            onChange={(v) => set("delegation.acceptsFrom", v)}
+            options={[
+              ...(primary ? [] : [{ value: "primary", label: "The primary" }]),
+              { value: "any", label: "Any agent" },
+              { value: "none", label: "Nobody" },
+            ]}
+          />
+        )}
+      </Field>
+      <Field label="Can delegate to" path="delegation.canDelegateTo" hint={primary ? "The primary can already reach every agent that accepts work from it." : undefined}>
+        {() => (
+          <div className="flex flex-wrap gap-1.5">
+            {others.length === 0 && <span className="text-[12.5px] text-ink-3">No other agents yet.</span>}
+            {others.map((a) => {
+              const on = canDelegateTo.includes(a.id);
+              return (
+                <ChipToggle key={a.id} on={on} onClick={() => set("delegation.canDelegateTo", on ? canDelegateTo.filter((x) => x !== a.id) : [...canDelegateTo, a.id])}>
+                  {a.name}
+                </ChipToggle>
+              );
+            })}
+          </div>
+        )}
+      </Field>
+    </Section>
+  );
+}
 
+export function OverviewPanel({ id, root, agents, runtime, resolved, engineOnline, openSettings }: PanelProps) {
   return (
     <>
-      <Section title="Identity">
-        <TextField label="Name" path="name" />
-        <TextField label="Role" path="role" hint="A short label shown on the canvas, like researcher or planner." />
-        <TextField label="Description" path="description" multiline rows={4} hint="The primary reads this to decide when to delegate, so write it for a model." />
-      </Section>
-
+      <IdentitySection />
       <Section title="Model">
-        <Field
-          label="Model"
-          path="model"
-          aside={
-            <Provenance
-              overridden={model !== undefined}
-              inheritedLabel={root?.defaultModel ?? "default"}
-              onOverride={() => set("model", root?.defaultModel ?? "")}
-              onReset={() => set("model", undefined)}
-            />
-          }
-        >
-          {({ id: fid, describedBy, invalid }) => (
-            <select
-              id={fid}
-              aria-describedby={describedBy}
-              aria-invalid={invalid}
-              value={model ?? ""}
-              onChange={(e) => set("model", e.target.value || undefined)}
-              className={cn(inputCls(invalid), "appearance-none font-mono text-[13px]")}
-            >
-              <option value="">
-                Root default: {root?.defaultModel ?? "…"}
-                {defaultModel ? ` (${defaultModel.id})` : ""}
-              </option>
-              {root?.models.map((m) => (
-                <option key={m.key} value={m.key}>
-                  {m.key} ({m.id})
-                </option>
-              ))}
-              {model && root && !root.models.some((m) => m.key === model) && <option value={model}>{model} (missing)</option>}
-            </select>
-          )}
-        </Field>
+        <ModelField root={root} />
       </Section>
-
-      <Section title="Delegation" hint="Who can hand work to this agent, and who it can hand work to.">
-        <Field label="Accepts work from" path="delegation.acceptsFrom">
-          {() => (
-            <Segmented
-              label="Accepts work from"
-              value={acceptsFrom}
-              onChange={(v) => set("delegation.acceptsFrom", v)}
-              options={[
-                ...(primary ? [] : [{ value: "primary", label: "The primary" }]),
-                { value: "any", label: "Any agent" },
-                { value: "none", label: "Nobody" },
-              ]}
-            />
-          )}
-        </Field>
-        <Field label="Can delegate to" path="delegation.canDelegateTo" hint={primary ? "The primary can already reach every agent that accepts work from it." : undefined}>
-          {() => (
-            <div className="flex flex-wrap gap-1.5">
-              {others.length === 0 && <span className="text-[12.5px] text-ink-3">No other agents yet.</span>}
-              {others.map((a) => {
-                const on = canDelegateTo.includes(a.id);
-                return (
-                  <ChipToggle key={a.id} on={on} onClick={() => set("delegation.canDelegateTo", on ? canDelegateTo.filter((x) => x !== a.id) : [...canDelegateTo, a.id])}>
-                    {a.name}
-                  </ChipToggle>
-                );
-              })}
-            </div>
-          )}
-        </Field>
-      </Section>
-
+      <DelegationSection id={id} agents={agents} />
       <TelegramSection id={id} runtime={runtime} resolved={resolved} root={root} engineOnline={engineOnline} openSettings={openSettings} />
     </>
   );
@@ -119,75 +135,98 @@ export function OverviewPanel({ id, root, agents, runtime, resolved, engineOnlin
 
 /* ---------------------------------------------------------------------------------------------- */
 
-export function PromptPanel({ instructionsText, setInstructions, hasInstructionsFile }: PanelProps) {
+export function InstructionsSection({ instructionsText, setInstructions, hasInstructionsFile }: Pick<PanelProps, "instructionsText" | "setInstructions" | "hasInstructionsFile">) {
   const { config, set } = useForm();
   const inline = getPath(config, "instructions.inline") as string | undefined;
   const file = (getPath(config, "instructions.file") as string | undefined) ?? "instructions.md";
-  const includeSoul = (getPath(config, "instructions.includeSoul") as boolean | undefined) ?? true;
-  const mem = getPath(config, "instructions.includeMemoryFiles") as boolean | undefined;
-  const primary = getPath(config, "primary") === true;
   const isInline = inline !== undefined;
   const text = isInline ? inline : instructionsText;
   const lines = text.split("\n").length;
 
   return (
-    <>
-      <Section title="Instructions" hint="The role prompt. Edits to the file apply on the agent's next message; no reload needed.">
-        <div className="flex items-center gap-3">
-          <Segmented
-            label="Where the prompt lives"
-            value={isInline ? "inline" : "file"}
-            onChange={(v) => {
-              if (v === "inline") set("instructions.inline", instructionsText);
-              else {
-                setInstructions(inline ?? instructionsText);
-                set("instructions.inline", undefined);
-              }
-            }}
-            options={[
-              { value: "file", label: file },
-              { value: "inline", label: "Inline in config" },
-            ]}
+    <Section title="Instructions" hint="The role prompt. Edits to the file apply on the agent's next message; no reload needed.">
+      <div className="flex items-center gap-3">
+        <Segmented
+          label="Where the prompt lives"
+          value={isInline ? "inline" : "file"}
+          onChange={(v) => {
+            if (v === "inline") set("instructions.inline", instructionsText);
+            else {
+              setInstructions(inline ?? instructionsText);
+              set("instructions.inline", undefined);
+            }
+          }}
+          options={[
+            { value: "file", label: file },
+            { value: "inline", label: "Inline in config" },
+          ]}
+        />
+        <span className="ml-auto font-mono text-[11.5px] text-ink-3 tabular-nums">
+          {lines} {lines === 1 ? "line" : "lines"}
+        </span>
+      </div>
+      {!isInline && !hasInstructionsFile && <p className="text-[12.5px] text-warn">{file} does not exist yet. Saving creates it.</p>}
+      <Field label="Prompt" path={isInline ? "instructions.inline" : "instructions"}>
+        {({ id, describedBy, invalid }) => (
+          <textarea
+            id={id}
+            aria-describedby={describedBy}
+            aria-invalid={invalid}
+            value={text}
+            spellCheck={false}
+            onChange={(e) => (isInline ? set("instructions.inline", e.target.value) : setInstructions(e.target.value))}
+            rows={18}
+            className={cn(inputCls(invalid), "min-h-[320px] resize-y font-mono text-[12.5px] leading-[1.65]")}
+            placeholder="You are…"
           />
-          <span className="ml-auto font-mono text-[11.5px] text-ink-3 tabular-nums">
-            {lines} {lines === 1 ? "line" : "lines"}
-          </span>
-        </div>
-        {!isInline && !hasInstructionsFile && <p className="text-[12.5px] text-warn">{file} does not exist yet. Saving creates it.</p>}
-        <Field label="Prompt" path={isInline ? "instructions.inline" : "instructions"}>
-          {({ id, describedBy, invalid }) => (
-            <textarea
-              id={id}
-              aria-describedby={describedBy}
-              aria-invalid={invalid}
-              value={text}
-              spellCheck={false}
-              onChange={(e) => (isInline ? set("instructions.inline", e.target.value) : setInstructions(e.target.value))}
-              rows={18}
-              className={cn(inputCls(invalid), "min-h-[320px] resize-y font-mono text-[12.5px] leading-[1.65]")}
-              placeholder="You are…"
-            />
-          )}
-        </Field>
-      </Section>
+        )}
+      </Field>
+    </Section>
+  );
+}
+
+/** Whether the curated ~/.eigen/memory/*.md block is appended to the prompt. */
+export function MemoryFilesField() {
+  const { config, set } = useForm();
+  const mem = getPath(config, "instructions.includeMemoryFiles") as boolean | undefined;
+  const primary = getPath(config, "primary") === true;
+  return (
+    <Field label="Curated memory files" path="instructions.includeMemoryFiles" hint={`Appends ~/.eigen/memory/*.md. Default is ${primary ? "on (primary)" : "off"}.`}>
+      {() => (
+        <Segmented
+          label="Curated memory files"
+          value={mem === undefined ? "default" : mem ? "on" : "off"}
+          onChange={(v) => set("instructions.includeMemoryFiles", v === "default" ? undefined : v === "on")}
+          options={[
+            { value: "default", label: `Default (${primary ? "on" : "off"})` },
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+        />
+      )}
+    </Field>
+  );
+}
+
+export function PromptPanel({ instructionsText, setInstructions, hasInstructionsFile }: PanelProps) {
+  const { config, set } = useForm();
+  const includeSoul = (getPath(config, "instructions.includeSoul") as boolean | undefined) ?? true;
+  // A soul chosen in the builder wins over this switch, so the switch says so instead of silently doing nothing.
+  const soulSource = getPath(config, "soul.source") as string | undefined;
+  return (
+    <>
+      <InstructionsSection instructionsText={instructionsText} setInstructions={setInstructions} hasInstructionsFile={hasInstructionsFile} />
       <Section title="Context">
-        <SwitchRow label="Prepend the shared persona" hint="Adds ~/.eigen/SOUL.md before the prompt.">
-          <Switch label="Prepend the shared persona" checked={includeSoul} onChange={(v) => set("instructions.includeSoul", v ? undefined : false)} />
-        </SwitchRow>
-        <Field label="Curated memory files" path="instructions.includeMemoryFiles" hint={`Appends ~/.eigen/memory/*.md. Default is ${primary ? "on (primary)" : "off"}.`}>
-          {() => (
-            <Segmented
-              label="Curated memory files"
-              value={mem === undefined ? "default" : mem ? "on" : "off"}
-              onChange={(v) => set("instructions.includeMemoryFiles", v === "default" ? undefined : v === "on")}
-              options={[
-                { value: "default", label: `Default (${primary ? "on" : "off"})` },
-                { value: "on", label: "On" },
-                { value: "off", label: "Off" },
-              ]}
-            />
-          )}
-        </Field>
+        {soulSource === undefined ? (
+          <SwitchRow label="Prepend the shared persona" hint="Adds ~/.eigen/SOUL.md before the prompt.">
+            <Switch label="Prepend the shared persona" checked={includeSoul} onChange={(v) => set("instructions.includeSoul", v ? undefined : false)} />
+          </SwitchRow>
+        ) : (
+          <SwitchRow label="Persona" hint={`The soul is set to "${soulSource}" by the Soul component in the builder, which replaces this switch.`}>
+            <Switch label="Persona" checked={soulSource !== "none"} onChange={() => undefined} disabled />
+          </SwitchRow>
+        )}
+        <MemoryFilesField />
       </Section>
     </>
   );
@@ -279,99 +318,127 @@ export function ToolsPanel({ root }: PanelProps) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-export function MemoryPanel({ root }: PanelProps) {
+/** Isolated or shared with the primary: which memory the agent reads and writes. */
+export function MemoryScopeSection() {
   const { config, set } = useForm();
   const scope = (getPath(config, "memory.scope") as string | undefined) ?? "isolated";
+  return (
+    <Section title="Scope">
+      <Segmented
+        label="Memory scope"
+        value={scope}
+        onChange={(v) => set("memory.scope", v)}
+        options={[
+          { value: "isolated", label: "Isolated" },
+          { value: "shared", label: "Shared with primary" },
+        ]}
+      />
+      <p className="text-[12.5px] text-ink-3">{scope === "shared" ? "Uses the same memory as the primary, including what it knows about you." : "Keeps its own threads and working memory."}</p>
+    </Section>
+  );
+}
+
+export function RecentMessagesField({ root }: { root?: RootInfo }) {
+  const { config, set } = useForm();
   const last = getPath(config, "memory.lastMessages") as number | undefined;
+  const d = root?.defaults;
+  return (
+    <Field
+      label="Recent messages kept in context"
+      path="memory.lastMessages"
+      hint={last === 0 ? "0 turns the history off: the agent sees only the current message plus what recall and observation give it." : undefined}
+      aside={<Provenance overridden={last !== undefined} inheritedLabel={String(d?.lastMessages ?? "")} onOverride={() => set("memory.lastMessages", d?.lastMessages ?? 20)} onReset={() => set("memory.lastMessages", undefined)} />}
+    >
+      {({ id, describedBy, invalid }) =>
+        last === undefined ? (
+          <div className="font-mono text-[13px] text-ink-3 tabular-nums">{d?.lastMessages ?? "…"}</div>
+        ) : (
+          <NumberInput id={id} describedBy={describedBy} invalid={invalid} min={0} value={last} onChange={(v) => set("memory.lastMessages", v ?? 1)} />
+        )
+      }
+    </Field>
+  );
+}
+
+export function SemanticRecallField({ root }: { root?: RootInfo }) {
+  const { config, set } = useForm();
   const sr = getPath(config, "memory.semanticRecall") as { enabled?: boolean; topK?: number; messageRange?: number } | undefined;
+  const d = root?.defaults;
+  return (
+    <Field
+      label="Semantic recall"
+      path="memory.semanticRecall"
+      aside={
+        <Provenance
+          overridden={sr !== undefined}
+          inheritedLabel={d ? (d.semanticRecall.enabled ? `on, top ${d.semanticRecall.topK}` : "off") : ""}
+          onOverride={() => set("memory.semanticRecall", { ...d?.semanticRecall })}
+          onReset={() => set("memory.semanticRecall", undefined)}
+        />
+      }
+    >
+      {() =>
+        sr === undefined ? (
+          <div className="text-[13px] text-ink-3">{d ? (d.semanticRecall.enabled ? `On: top ${d.semanticRecall.topK} matches, ${d.semanticRecall.messageRange} messages around each` : "Off") : "…"}</div>
+        ) : (
+          <div className="space-y-3 rounded-xl border border-line p-3">
+            <SwitchRow label="Search past conversations">
+              <Switch label="Semantic recall" checked={sr.enabled ?? d?.semanticRecall.enabled ?? true} onChange={(v) => set("memory.semanticRecall.enabled", v)} />
+            </SwitchRow>
+            <div className="flex gap-4">
+              <label className="text-[12px] text-ink-2">
+                <span className="mb-1 block">Matches</span>
+                <NumberInput value={sr.topK ?? d?.semanticRecall.topK} onChange={(v) => set("memory.semanticRecall.topK", v)} />
+              </label>
+              <label className="text-[12px] text-ink-2">
+                <span className="mb-1 block">Messages around each</span>
+                <NumberInput value={sr.messageRange ?? d?.semanticRecall.messageRange} onChange={(v) => set("memory.semanticRecall.messageRange", v)} />
+              </label>
+            </div>
+          </div>
+        )
+      }
+    </Field>
+  );
+}
+
+export function ObservationalField({ root }: { root?: RootInfo }) {
+  const { config, set } = useForm();
   const obs = getPath(config, "memory.observational") as { enabled?: boolean } | undefined;
   const d = root?.defaults;
+  return (
+    <Field
+      label="Observational memory"
+      path="memory.observational"
+      hint="Background agents compress old turns into observations."
+      aside={
+        <Provenance
+          overridden={obs !== undefined}
+          inheritedLabel={d?.observational.enabled ? "on" : "off"}
+          onOverride={() => set("memory.observational", { enabled: d?.observational.enabled ?? false })}
+          onReset={() => set("memory.observational", undefined)}
+        />
+      }
+    >
+      {() =>
+        obs === undefined ? (
+          <div className="text-[13px] text-ink-3">{d?.observational.enabled ? "On" : "Off"}</div>
+        ) : (
+          <Switch label="Observational memory" checked={obs.enabled ?? false} onChange={(v) => set("memory.observational.enabled", v)} />
+        )
+      }
+    </Field>
+  );
+}
 
+export function MemoryPanel({ root }: PanelProps) {
   return (
     <>
-      <Section title="Scope">
-        <Segmented
-          label="Memory scope"
-          value={scope}
-          onChange={(v) => set("memory.scope", v)}
-          options={[
-            { value: "isolated", label: "Isolated" },
-            { value: "shared", label: "Shared with primary" },
-          ]}
-        />
-        <p className="text-[12.5px] text-ink-3">
-          {scope === "shared" ? "Uses the same memory as the primary, including what it knows about you." : "Keeps its own threads and working memory."}
-        </p>
-      </Section>
+      <MemoryScopeSection />
       <Section title="Recall">
-        <Field
-          label="Recent messages kept in context"
-          path="memory.lastMessages"
-          aside={<Provenance overridden={last !== undefined} inheritedLabel={String(d?.lastMessages ?? "")} onOverride={() => set("memory.lastMessages", d?.lastMessages ?? 20)} onReset={() => set("memory.lastMessages", undefined)} />}
-        >
-          {({ id, describedBy, invalid }) =>
-            last === undefined ? (
-              <div className="font-mono text-[13px] text-ink-3 tabular-nums">{d?.lastMessages ?? "…"}</div>
-            ) : (
-              <NumberInput id={id} describedBy={describedBy} invalid={invalid} value={last} onChange={(v) => set("memory.lastMessages", v ?? 1)} />
-            )
-          }
-        </Field>
-        <Field
-          label="Semantic recall"
-          path="memory.semanticRecall"
-          aside={
-            <Provenance
-              overridden={sr !== undefined}
-              inheritedLabel={d ? (d.semanticRecall.enabled ? `on, top ${d.semanticRecall.topK}` : "off") : ""}
-              onOverride={() => set("memory.semanticRecall", { ...d?.semanticRecall })}
-              onReset={() => set("memory.semanticRecall", undefined)}
-            />
-          }
-        >
-          {() =>
-            sr === undefined ? (
-              <div className="text-[13px] text-ink-3">{d ? (d.semanticRecall.enabled ? `On: top ${d.semanticRecall.topK} matches, ${d.semanticRecall.messageRange} messages around each` : "Off") : "…"}</div>
-            ) : (
-              <div className="space-y-3 rounded-xl border border-line p-3">
-                <SwitchRow label="Search past conversations">
-                  <Switch label="Semantic recall" checked={sr.enabled ?? d?.semanticRecall.enabled ?? true} onChange={(v) => set("memory.semanticRecall.enabled", v)} />
-                </SwitchRow>
-                <div className="flex gap-4">
-                  <label className="text-[12px] text-ink-2">
-                    <span className="mb-1 block">Matches</span>
-                    <NumberInput value={sr.topK} onChange={(v) => set("memory.semanticRecall.topK", v)} />
-                  </label>
-                  <label className="text-[12px] text-ink-2">
-                    <span className="mb-1 block">Messages around each</span>
-                    <NumberInput value={sr.messageRange} onChange={(v) => set("memory.semanticRecall.messageRange", v)} />
-                  </label>
-                </div>
-              </div>
-            )
-          }
-        </Field>
-        <Field
-          label="Observational memory"
-          path="memory.observational"
-          hint="Background agents compress old turns into observations."
-          aside={
-            <Provenance
-              overridden={obs !== undefined}
-              inheritedLabel={d?.observational.enabled ? "on" : "off"}
-              onOverride={() => set("memory.observational", { enabled: d?.observational.enabled ?? false })}
-              onReset={() => set("memory.observational", undefined)}
-            />
-          }
-        >
-          {() =>
-            obs === undefined ? (
-              <div className="text-[13px] text-ink-3">{d?.observational.enabled ? "On" : "Off"}</div>
-            ) : (
-              <Switch label="Observational memory" checked={obs.enabled ?? false} onChange={(v) => set("memory.observational.enabled", v)} />
-            )
-          }
-        </Field>
+        <RecentMessagesField root={root} />
+        <SemanticRecallField root={root} />
+        <ObservationalField root={root} />
       </Section>
     </>
   );
@@ -379,10 +446,64 @@ export function MemoryPanel({ root }: PanelProps) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-export function AdvancedPanel({ root, onJson }: PanelProps & { onJson: (config: Record<string, unknown>) => void }) {
+export function MaxStepsField({ root }: { root?: RootInfo }) {
   const { config, set } = useForm();
   const maxSteps = getPath(config, "limits.maxSteps") as number | undefined;
+  return (
+    <Field
+      label="Max tool steps per message"
+      path="limits.maxSteps"
+      aside={<Provenance overridden={maxSteps !== undefined} inheritedLabel={String(root?.defaults.maxSteps ?? "")} onOverride={() => set("limits.maxSteps", root?.defaults.maxSteps ?? 25)} onReset={() => set("limits.maxSteps", undefined)} />}
+    >
+      {({ id, describedBy, invalid }) =>
+        maxSteps === undefined ? (
+          <div className="font-mono text-[13px] text-ink-3 tabular-nums">{root?.defaults.maxSteps ?? "…"}</div>
+        ) : (
+          <NumberInput id={id} describedBy={describedBy} invalid={invalid} value={maxSteps} onChange={(v) => set("limits.maxSteps", v ?? 1)} />
+        )
+      }
+    </Field>
+  );
+}
+
+export function SandboxField() {
+  const { config, set } = useForm();
   const sandbox = (getPath(config, "sandbox.mode") as string | undefined) ?? "shared";
+  // The primary is never built by the agent factory, so it cannot have a sandbox of its own: it always uses the shared one.
+  if (getPath(config, "primary") === true)
+    return (
+      <Field label="Sandbox" path="sandbox.mode" hint="The primary always uses the shared ~/.eigen/sandbox. A private sandbox is only for other agents.">
+        {() => (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-mono text-[13px] text-ink-3">Shared</span>
+            {sandbox === "own" && (
+              <button type="button" onClick={() => set("sandbox.mode", undefined)} className="text-[12.5px] font-medium text-accent hover:underline">
+                This file sets &quot;own&quot;, which is ignored. Remove it
+              </button>
+            )}
+          </div>
+        )}
+      </Field>
+    );
+  return (
+    <Field label="Sandbox" path="sandbox.mode" hint={sandbox === "own" ? "A private sandbox folder inside this agent's folder." : "The shared ~/.eigen/sandbox."}>
+      {() => (
+        <Segmented
+          label="Sandbox"
+          value={sandbox}
+          onChange={(v) => set("sandbox.mode", v)}
+          options={[
+            { value: "shared", label: "Shared" },
+            { value: "own", label: "Own" },
+          ]}
+        />
+      )}
+    </Field>
+  );
+}
+
+export function AdvancedPanel({ root, onJson }: PanelProps & { onJson: (config: Record<string, unknown>) => void }) {
+  const { config } = useForm();
   const pretty = JSON.stringify(config, null, 2);
   // While focused the textarea owns its text (it may be mid-edit, invalid JSON); otherwise it mirrors the draft.
   const [text, setText] = useState(pretty);
@@ -392,32 +513,8 @@ export function AdvancedPanel({ root, onJson }: PanelProps & { onJson: (config: 
   return (
     <>
       <Section title="Limits and sandbox">
-        <Field
-          label="Max tool steps per message"
-          path="limits.maxSteps"
-          aside={<Provenance overridden={maxSteps !== undefined} inheritedLabel={String(root?.defaults.maxSteps ?? "")} onOverride={() => set("limits.maxSteps", root?.defaults.maxSteps ?? 25)} onReset={() => set("limits.maxSteps", undefined)} />}
-        >
-          {({ id, describedBy, invalid }) =>
-            maxSteps === undefined ? (
-              <div className="font-mono text-[13px] text-ink-3 tabular-nums">{root?.defaults.maxSteps ?? "…"}</div>
-            ) : (
-              <NumberInput id={id} describedBy={describedBy} invalid={invalid} value={maxSteps} onChange={(v) => set("limits.maxSteps", v ?? 1)} />
-            )
-          }
-        </Field>
-        <Field label="Sandbox" path="sandbox.mode" hint={sandbox === "own" ? "A private sandbox folder inside this agent's folder." : "The shared ~/.eigen/sandbox."}>
-          {() => (
-            <Segmented
-              label="Sandbox"
-              value={sandbox}
-              onChange={(v) => set("sandbox.mode", v)}
-              options={[
-                { value: "shared", label: "Shared" },
-                { value: "own", label: "Own" },
-              ]}
-            />
-          )}
-        </Field>
+        <MaxStepsField root={root} />
+        <SandboxField />
       </Section>
       <Section title="config.json" hint="The raw file. Everything above edits this; edits here flow back into the forms.">
         <textarea

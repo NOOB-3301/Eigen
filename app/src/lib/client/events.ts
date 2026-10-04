@@ -1,6 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
-import { telegramNodeId, type AgentEvent, type GetAgentResponse, type TelegramRuntime } from "@eigen/engine/schema";
+import { mutate } from "swr";
+import { telegramNodeId, type AgentEvent, type AgentRuntime, type GetAgentResponse, type TelegramRuntime, type TriggerRuntime } from "@eigen/engine/schema";
+import { keys } from "@/lib/client/api";
+import { SKILLS_KEY } from "@/lib/client/library";
+import { refreshTriggerRuns } from "@/lib/client/triggers";
 import type { FleetResponse } from "@/lib/types";
 
 type Listener = (e: AgentEvent) => void;
@@ -38,7 +42,9 @@ export function useEventStream(initial: "online" | "offline"): StreamState {
       } catch {
         return;
       }
-      if (ev && typeof ev === "object" && "type" in ev) listeners.forEach((l) => l(ev));
+      if (!ev || typeof ev !== "object" || !("type" in ev)) return;
+      patchCaches(ev);
+      listeners.forEach((l) => l(ev));
     };
     es.onerror = () => setState((s) => ({ ...s, connected: false }));
     return () => {
@@ -71,3 +77,33 @@ export function applyTelegramToFleet(f: FleetResponse, id: string, t: TelegramRu
 }
 
 export const applyTelegramToAgent = (a: GetAgentResponse, t: TelegramRuntime): GetAgentResponse => ({ ...a, runtime: { ...a.runtime, telegram: t } });
+
+/* `agent.trigger` carries one trigger's whole new TriggerRuntime: it replaces that entry (or is added) in runtime.triggers, in place. */
+
+const withTrigger = (r: AgentRuntime, t: TriggerRuntime): AgentRuntime => {
+  const list = r.triggers ?? [];
+  return { ...r, triggers: list.some((x) => x.id === t.id) ? list.map((x) => (x.id === t.id ? t : x)) : [...list, t] };
+};
+
+export function applyTriggerToFleet(f: FleetResponse, id: string, t: TriggerRuntime): FleetResponse {
+  return {
+    ...f,
+    agents: f.agents.map((a) => (a.id === id ? { ...a, runtime: withTrigger(a.runtime, t) } : a)),
+    topology: { ...f.topology, nodes: f.topology.nodes.map((n) => (n.type === "agent" && n.data.id === id ? { ...n, data: { ...n.data, runtime: withTrigger(n.data.runtime, t) } } : n)) },
+  };
+}
+
+export const applyTriggerToAgent = (a: GetAgentResponse, t: TriggerRuntime): GetAgentResponse => ({ ...a, runtime: withTrigger(a.runtime, t) });
+
+/**
+ * Cache work that belongs to the data layer, done once per event before listeners run, so it holds whichever components are mounted:
+ * a trigger patches the fleet and agent caches and refetches that agent's run log (a finished run is the newest entry); anything that
+ * can change an agent's skills.inherit refreshes the skill list's usedBy.
+ */
+function patchCaches(ev: AgentEvent) {
+  if (ev.type === "agent.trigger") {
+    void mutate(keys.fleet, (f?: FleetResponse) => f && applyTriggerToFleet(f, ev.id, ev.trigger), { revalidate: false });
+    void mutate(keys.agent(ev.id), (a?: GetAgentResponse) => a && applyTriggerToAgent(a, ev.trigger), { revalidate: false });
+    void refreshTriggerRuns(ev.id);
+  } else if (ev.type === "agent.loaded" || ev.type === "agent.removed" || ev.type === "fleet.changed") void mutate(SKILLS_KEY);
+}

@@ -1,23 +1,23 @@
 "use client";
 import { motion, AnimatePresence } from "motion/react";
-import { AlertTriangle, ChevronRight, Crown, Plus } from "lucide-react";
+import { AlertTriangle, Blocks, ChevronRight, Crown, Plus } from "lucide-react";
 import type { FleetResponse } from "@/lib/types";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
 import { TelegramStateChip, telegramView } from "@/components/canvas/telegram-state";
 
 /** Phone layout: the canvas is too cramped below 640px, so the team is a list (primary first). */
-export function AgentList({ fleet, onOpen, onCreate }: { fleet: FleetResponse; onOpen: (id: string) => void; onCreate: () => void }) {
+export function AgentList({ fleet, onOpen, onBuild, onCreate }: { fleet: FleetResponse; onOpen: (id: string) => void; onBuild: (id: string) => void; onCreate: () => void }) {
   const agents = [...fleet.agents].sort((a, b) => Number(b.primary) - Number(a.primary) || a.name.localeCompare(b.name));
   return (
     <div className="h-full overflow-y-auto px-4 pt-[76px] pb-8">
       <ul className="space-y-2">
         <AnimatePresence initial={false}>
           {agents.map((a) => (
-            <motion.li key={a.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, x: -24 }} transition={spring}>
+            <motion.li key={a.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, x: -24 }} transition={spring} className="flex items-stretch gap-2">
               <button
                 type="button"
                 onClick={() => onOpen(a.id)}
-                className="flex w-full items-center gap-3 rounded-xl border border-line bg-panel p-3 text-left shadow-float active:scale-[0.99]"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-line bg-panel p-3 text-left shadow-float active:scale-[0.99]"
               >
                 <Monogram id={a.id} name={a.name} />
                 <span className="min-w-0 flex-1">
@@ -40,6 +40,14 @@ export function AgentList({ fleet, onOpen, onCreate }: { fleet: FleetResponse; o
                   <StatusDot status={a.runtime.status} />
                   <ChevronRight size={16} className="text-ink-3" />
                 </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onBuild(a.id)}
+                aria-label={`Open the builder for ${a.name}`}
+                className="grid w-12 shrink-0 place-items-center rounded-xl border border-line bg-panel text-ink-2 shadow-float active:scale-[0.97]"
+              >
+                <Blocks size={17} />
               </button>
             </motion.li>
           ))}

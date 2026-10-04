@@ -3,30 +3,45 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { SWRConfig, useSWRConfig } from "swr";
 import { AnimatePresence, motion } from "motion/react";
 import { Toaster, toast } from "sonner";
-import { AlertTriangle, Plus, Search, Settings as SettingsIcon } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Plus, Search, Settings as SettingsIcon } from "lucide-react";
 import type { AgentEvent, GetAgentResponse } from "@eigen/engine/schema";
 import type { FleetResponse, Layout, RootInfo } from "@/lib/types";
 import { keys, useFleet, useLayout, useRoot } from "@/lib/client/api";
 import { applyTelegramToAgent, applyTelegramToFleet, awaitingReload, fleetHasBot, onAgentEvent, useEventStream } from "@/lib/client/events";
 import { cn } from "@/lib/cn";
-import { Button, Kbd, softSpring } from "@/components/ui";
+import { Button, Kbd, Modal, softSpring } from "@/components/ui";
 import { ThemeToggle, useTheme } from "@/components/theme";
 import { Canvas, type CanvasApi } from "@/components/canvas/flow";
 import { CABLES } from "@/components/canvas/edges";
 import { Inspector } from "@/components/inspector/inspector";
+import { Builder } from "@/components/builder/builder";
 import { NewAgentDialog } from "@/components/new-agent-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import { AgentList } from "@/components/agent-list";
 import { SettingsDialog, type SettingsSection } from "@/components/settings/settings-dialog";
 
-type Props = { initialFleet: FleetResponse; initialRoot?: RootInfo; initialLayout: Layout; initialSettings?: SettingsSection };
+/** `initialBuilder`: ?view=builder&agent=<id>. `initialAgent`: ?agent=<id> alone opens that agent's inspector. */
+type Props = { initialFleet: FleetResponse; initialRoot?: RootInfo; initialLayout: Layout; initialSettings?: SettingsSection; initialBuilder?: string; initialAgent?: string };
 
-export function Studio({ initialFleet, initialRoot, initialLayout, initialSettings }: Props) {
+export function Studio({ initialFleet, initialRoot, initialLayout, initialSettings, initialBuilder, initialAgent }: Props) {
   return (
     <SWRConfig value={{ fallback: { [keys.fleet]: initialFleet, [keys.root]: initialRoot, [keys.layout]: initialLayout } }}>
-      <StudioInner initialEngine={initialFleet.engine} initialSettings={initialSettings} />
+      <StudioInner initialEngine={initialFleet.engine} initialSettings={initialSettings} initialBuilder={initialBuilder} initialAgent={initialAgent} />
     </SWRConfig>
   );
+}
+
+/** The builder lives in the URL (?agent=<id>&view=builder), so it can be linked, reloaded and left with the back button. Other params (?settings=) are kept. */
+function urlWithBuilder(id: string | null) {
+  const url = new URL(window.location.href);
+  if (id) {
+    url.searchParams.set("agent", id);
+    url.searchParams.set("view", "builder");
+  } else {
+    url.searchParams.delete("agent");
+    url.searchParams.delete("view");
+  }
+  return url;
 }
 
 const useMedia = (q: string) =>
@@ -40,7 +55,7 @@ const useMedia = (q: string) =>
     () => false,
   );
 
-function StudioInner({ initialEngine, initialSettings }: { initialEngine: "online" | "offline"; initialSettings?: SettingsSection }) {
+function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAgent }: { initialEngine: "online" | "offline"; initialSettings?: SettingsSection; initialBuilder?: string; initialAgent?: string }) {
   const { data: fleet } = useFleet();
   const { data: root } = useRoot();
   const { data: layout } = useLayout();
@@ -49,7 +64,11 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
   const stream = useEventStream(initialEngine);
   const phone = useMedia("(max-width: 639px)");
   const wide = useMedia("(min-width: 1024px)");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initialBuilder ? null : (initialAgent ?? null));
+  const [builderId, setBuilderId] = useState<string | null>(initialBuilder ?? null);
+  // Changes staged in the builder that are not applied; leaving would lose them, so every way out asks first.
+  const [staged, setStaged] = useState(0);
+  const [leave, setLeave] = useState<{ next: string | null } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [settings, setSettings] = useState<{ open: boolean; section?: SettingsSection }>({ open: !!initialSettings, section: initialSettings });
@@ -96,6 +115,8 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
           toast.error(`${names.current.get(ev.id) ?? ev.id}'s Telegram bot has a problem`, { id: `tg-${ev.id}`, description: ev.telegram.error ?? "Telegram rejected the bot." });
         return;
       }
+      // The data layer (lib/client/events.ts) already patched the fleet and agent caches in place for this event; a refetch would only repeat it.
+      if (ev.type === "agent.trigger") return;
       void mutate(keys.fleet);
       if (ev.type === "fleet.changed") {
         void mutate(keys.root);
@@ -150,10 +171,63 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
     }
   }, []);
 
-  const jump = useCallback((id: string) => {
-    setSelected(id);
-    canvas.current?.focus(id);
+
+  const stagedRef = useRef(0);
+  const builderRef = useRef<string | null>(builderId);
+  useEffect(() => {
+    stagedRef.current = staged;
+    builderRef.current = builderId;
+  }, [staged, builderId]);
+
+  const goBuilder = useCallback((id: string | null) => {
+    window.history.pushState(null, "", urlWithBuilder(id));
+    setBuilderId(id);
+    setStaged(0);
+    if (id) setSelected(null);
   }, []);
+  /** Open the builder for an agent, or (null) go back to the team; asks first when changes are staged. */
+  const navigate = useCallback(
+    (id: string | null) => {
+      if (id === builderRef.current) return;
+      if (stagedRef.current > 0) setLeave({ next: id });
+      else goBuilder(id);
+    },
+    [goBuilder],
+  );
+
+  const jump = useCallback(
+    (id: string) => {
+      // In the builder "jump to an agent" means build that agent.
+      if (builderRef.current) return navigate(id);
+      setSelected(id);
+      canvas.current?.focus(id);
+    },
+    [navigate],
+  );
+
+  // The browser's back and forward buttons follow the URL; with staged changes the move is undone and asked about.
+  useEffect(() => {
+    const onPop = () => {
+      const p = new URL(window.location.href).searchParams;
+      const next = p.get("view") === "builder" ? p.get("agent") : null;
+      if (stagedRef.current > 0 && next !== builderRef.current) {
+        window.history.pushState(null, "", urlWithBuilder(builderRef.current));
+        setLeave({ next });
+        return;
+      }
+      setBuilderId(next);
+      setStaged(0);
+      if (next) setSelected(null);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  useEffect(() => {
+    if (!staged) return;
+    const onUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [staged]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -173,24 +247,55 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-canvas">
       {/* Canvas / list */}
-      <main className="absolute inset-0 isolate" aria-label="Agent team">
-        {fleet && !phone && <Canvas fleet={fleet} savedLayout={layout ?? {}} selectedId={selected} onSelect={select} occludedRight={selected ? inspectorWidth : 0} drawerWidth={inspectorWidth} apiRef={canvas} />}
-        {fleet && phone && <AgentList fleet={fleet} onOpen={setSelected} onCreate={() => setNewOpen(true)} />}
-      </main>
+      {!builderId && (
+        <main className="absolute inset-0 isolate" aria-label="Agent team">
+          {fleet && !phone && (
+            <Canvas fleet={fleet} savedLayout={layout ?? {}} selectedId={selected} onSelect={select} onOpenBuilder={navigate} occludedRight={selected ? inspectorWidth : 0} drawerWidth={inspectorWidth} apiRef={canvas} />
+          )}
+          {fleet && phone && <AgentList fleet={fleet} onOpen={setSelected} onBuild={navigate} onCreate={() => setNewOpen(true)} />}
+        </main>
+      )}
+
+      {/* Builder: one agent in the middle, its components around it */}
+      {builderId && fleet && (
+        <Builder
+          key={builderId}
+          agentId={builderId}
+          fleet={fleet}
+          root={root}
+          engineOnline={engineOnline}
+          phone={phone}
+          wide={wide}
+          onDirtyChange={setStaged}
+          onGone={() => goBuilder(null)}
+          onOpenSettings={openSettings}
+        />
+      )}
 
       {/* Top bar */}
       <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start gap-2 p-3 sm:gap-3 sm:p-4">
         <div className="pointer-events-auto flex h-11 min-w-0 items-center gap-3 rounded-xl border border-line bg-panel/90 pr-2 pl-3.5 shadow-float backdrop-blur-md">
           <Wordmark />
-          <span className="hidden h-4 w-px bg-line sm:block" aria-hidden />
-          <span className="hidden text-[12.5px] whitespace-nowrap text-ink-2 tabular-nums sm:inline">
-            {agentCount} {agentCount === 1 ? "agent" : "agents"}
-          </span>
-          {brokenCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-bad/12 px-2 py-0.5 text-[11.5px] font-medium whitespace-nowrap text-bad" title={`${brokenCount} with problems`}>
-              <AlertTriangle size={11} /> {brokenCount}
-              <span className="hidden sm:inline">with problems</span>
-            </span>
+          {builderId ? (
+            <>
+              <span className="h-4 w-px bg-line" aria-hidden />
+              <Button variant="quiet" className="h-8 px-2" onClick={() => navigate(null)} aria-label="Back to the team">
+                <ArrowLeft size={14} /> <span className="hidden sm:inline">Team</span>
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="hidden h-4 w-px bg-line sm:block" aria-hidden />
+              <span className="hidden text-[12.5px] whitespace-nowrap text-ink-2 tabular-nums sm:inline">
+                {agentCount} {agentCount === 1 ? "agent" : "agents"}
+              </span>
+              {brokenCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-bad/12 px-2 py-0.5 text-[11.5px] font-medium whitespace-nowrap text-bad" title={`${brokenCount} with problems`}>
+                  <AlertTriangle size={11} /> {brokenCount}
+                  <span className="hidden sm:inline">with problems</span>
+                </span>
+              )}
+            </>
           )}
         </div>
         <div className="pointer-events-auto ml-auto flex h-11 items-center gap-1 rounded-xl border border-line bg-panel/90 px-1.5 shadow-float backdrop-blur-md">
@@ -227,7 +332,7 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={softSpring}
-            className="absolute top-[68px] left-1/2 z-10 w-[min(560px,calc(100%-32px))] -translate-x-1/2 rounded-xl border border-warn/40 bg-panel px-4 py-2.5 text-[12.5px] shadow-float sm:top-[76px]"
+            className={cn("absolute left-1/2 z-10 w-[min(560px,calc(100%-32px))] -translate-x-1/2 rounded-xl border border-warn/40 bg-panel px-4 py-2.5 text-[12.5px] shadow-float", builderId ? "top-[124px] sm:top-[132px]" : "top-[68px] sm:top-[76px]")}
           >
             <div className="flex gap-2">
               <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" />
@@ -242,7 +347,7 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
       </AnimatePresence>
 
       {/* Cable legend */}
-      {!phone && fleet && fleet.agents.length > 0 && (
+      {!builderId && !phone && fleet && fleet.agents.length > 0 && (
         <aside aria-label="Edge legend" className="absolute bottom-4 left-4 z-10 rounded-xl border border-line bg-panel/90 px-3 py-2.5 shadow-float backdrop-blur-md">
           <ul className="grid gap-1.5">
             {CABLES.map((c) => (
@@ -258,7 +363,7 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
       )}
 
       {/* Empty state */}
-      {fleet && fleet.agents.length === 0 && (
+      {!builderId && fleet && fleet.agents.length === 0 && (
         <div className="absolute inset-0 grid place-items-center p-6">
           <div className="max-w-sm text-center">
             <h2 className="text-[17px] font-semibold text-ink">{fleet.rootError ? "The root config.json cannot be read" : "No agents yet"}</h2>
@@ -276,7 +381,7 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
 
       {/* Inspector */}
       <AnimatePresence>
-        {selected && fleet && (
+        {selected && fleet && !builderId && (
           <Inspector
             key={selected}
             id={selected}
@@ -285,6 +390,7 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
             engineOnline={engineOnline}
             onClose={close}
             onOpenSettings={openSettings}
+            onOpenBuilder={navigate}
             className={cn("absolute top-0 right-0 bottom-0 z-30", phone ? "w-full" : "sm:top-[76px] sm:right-4 sm:bottom-4 sm:rounded-2xl sm:border")}
             style={phone ? undefined : { width: inspectorWidth }}
           />
@@ -306,15 +412,42 @@ function StudioInner({ initialEngine, initialSettings }: { initialEngine: "onlin
         onClose={() => setPaletteOpen(false)}
         agents={fleet?.agents ?? []}
         onJump={jump}
+        onBuild={navigate}
+        builderId={builderId}
+        currentId={builderId ?? selected}
         onCreate={() => setNewOpen(true)}
         onToggleTheme={theme.cycle}
         onFit={() => canvas.current?.fit()}
         onSettings={openSettings}
       />
       <SettingsDialog open={settings.open} onClose={closeSettings} section={settings.section} />
+      <Modal open={!!leave} onClose={() => setLeave(null)} title="Leave with unapplied changes">
+        <div className="p-5">
+          <h3 className="text-[15px] font-semibold text-ink">Discard the changes you have not applied?</h3>
+          <p className="mt-2 text-[13px] text-ink-2">
+            {staged} {staged === 1 ? "change is" : "changes are"} staged on this agent and not written yet. Leaving drops {staged === 1 ? "it" : "them"}.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="quiet" onClick={() => setLeave(null)}>
+              Keep editing
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                const next = leave?.next ?? null;
+                setLeave(null);
+                goBuilder(next);
+              }}
+            >
+              Discard and leave
+            </Button>
+          </div>
+        </div>
+      </Modal>
       <Toaster
         theme={theme.resolved}
         position="bottom-center"
+        offset={builderId ? { bottom: 92 } : undefined}
         toastOptions={{ classNames: { toast: "!bg-panel !border-line !text-ink !shadow-float !rounded-xl", description: "!text-ink-2" } }}
       />
     </div>

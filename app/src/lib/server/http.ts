@@ -25,5 +25,5 @@ export async function readBody<S extends z.ZodType>(req: Request, schema: S): Pr
 /** Turns unexpected failures (unreadable root config, bad id) into a JSON error without leaking paths. */
 export function failure(e: unknown, status = 500) {
   const msg = scrubPaths(e instanceof Error ? e.message : String(e));
-  return json({ ok: false, issues: [msg] }, /invalid agent id/.test(msg) ? 400 : status);
+  return json({ ok: false, issues: [msg] }, /invalid (agent id|skill slug)/.test(msg) ? 400 : status);
 }
