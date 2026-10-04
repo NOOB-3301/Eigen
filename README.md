@@ -34,6 +34,27 @@ The studio (`app/`, http://127.0.0.1:4100) shows the team as a graph and edits t
 
 **Settings and secrets.** The studio's Settings window edits the shared `~/.eigen/config.json`: models (add your own, with a Test button), the root bot, memory defaults, sandbox policy, the MCP server catalog. Removing a model or MCP server that an agent still uses is refused. API keys and bot tokens are written to `~/.eigen/.env` from the studio and are **write-only**: it can say whether a variable is set and replace or remove it, and no endpoint returns a value. Config files hold only the variable's name (`apiKeyEnv`, `tokenEnv`, `env:NAME`). A key saved in the studio works without a restart, and only the agents that use it are rebuilt.
 
+### The builder
+
+Open an agent in the builder: double-click it on the team canvas, press **Open builder**, or use the command palette. The address is `/?agent=<id>&view=builder`. The agent sits in the middle and its components are nodes around it: Model, Instructions, Soul and the three memory kinds on the left ("Thinks with"); the Workspace tool, MCP servers and Skills on the right ("Can use"); the Telegram bot and Triggers above ("Reaches it, wakes it"). A connected component has a cable to the agent.
+
+- **Connect** a component with its Connect button, from **Add component**, or by dragging a ghost node onto the agent. **Disconnect** it from its panel, or select it and press Delete. Disconnecting memory keeps its data on disk; disconnecting the soul keeps an own `soul.md`.
+- Changes are **staged**. The bar at the bottom counts them and shows the diff; **Apply** (Cmd/Ctrl+S) writes `config.json`, the engine reloads only that agent and the bar says "Live"; **Discard** throws them away. If the file changed on disk meanwhile you are told and can overwrite or load theirs.
+- Click a node for its editor: a model picker with a Test button, the soul editor, the skill editor (skills are a shared library: an edit reaches every agent that uses the skill), the trigger form with its run history and a Run now button, the MCP form, the Telegram settings. **Chat** opens a side panel to talk to the agent. Enter opens a focused node, Escape closes a panel.
+- The table of which node writes which config key is at the top of `app/src/components/builder/model.ts`.
+
+### What an agent is made of
+
+Each part below is a block in the agent's `config.json` and changes apply without a restart.
+
+- **Soul.** `soul.source` is `shared` (the file `~/.eigen/SOUL.md`, read by every agent that picks it), `own` (a `soul.md` next to the agent's `config.json`; `soul.file` is a plain file name in that folder) or `none`. The file is re-read on every message, so an edit is live on the next one.
+- **Skills.** `skills.inherit` is `"all"` (default), `"none"`, or a list of names from `~/.eigen/skills/<slug>/SKILL.md` (`@owner/slug` for ClawHub installs). Skills load through the workspace tool, so an agent without it has none. Mastra silently skips a skill whose frontmatter is invalid or whose `name` differs from its folder; the studio shows the reason. ClawHub skills are read-only in the studio.
+- **Memory.** `memory.lastMessages` (0 means stateless: nothing is saved, so recall has nothing to find), `memory.semanticRecall.enabled`, `memory.observational.enabled`, and `memory.scope`: `shared` agents use the user's memory (the same as Telegram), `isolated` ones their own, on Telegram and in the studio chat alike.
+- **Triggers.** `triggers` is a list of things that wake the agent up. `cron` runs the prompt on a five-field schedule in a time zone. `github-pr` polls one repo's pull requests with a token from a `.env` variable (`tokenEnv`; the token goes only to GitHub, as a Bearer header). The first poll only records the PRs already open; a restart does not re-fire old ones. Each run's reply goes to the agent's Telegram chat and to a run history in the studio (`data/triggers/<agent>/runs.jsonl`, newest 200). Nobody is there to approve tool calls in a triggered run, so every approval is declined and the reply says what was not done. The text of a pull request is written by other people: the engine puts it in a block the agent is told is untrusted data, but that is a mitigation, not a guarantee. Do not point a GitHub trigger at an agent that has the workspace tool or trusted MCP servers unless you accept that.
+- **Telegram bot.** Described above: one bot per agent, token from `.env`.
+
+**Chat in the studio.** Any enabled agent can be chatted with from the studio. The primary shares its memory with your Telegram chat but uses a thread of its own; an isolated agent keeps its own. Tool calls that need approval show Approve / Deny.
+
 `npm run migrate` creates `.agents/eigen/` for an existing install (it never moves or deletes anything; the first engine start does the same when `.agents/` is empty). The studio only accepts requests from its own origin on loopback (`EIGEN_APP_ORIGINS` adds more); `npm run test:security` checks that against a running studio.
 
 ## Talking to it
@@ -120,10 +141,13 @@ npm run test:live   # real ClawHub install through the agent (needs network)
 npm run dev         # engine (Mastra Studio on 4111, hot reload) + agent studio (4100), using ~/.eigen/.env
 ```
 
-Layout: `engine/` is the Mastra project, `app/` the Next.js studio (React Flow); both are npm workspaces. In `engine/`, `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `memory.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them, and `lib/tools/` holds the tools (`schedule.ts`, `mcp.ts`, `approval.ts`, and `workspace.ts` for `read`/`write`/`edit`/`bash`). Tools live there, not in `agents/eigen/tools/`, because Mastra ignores discovered tool files when `config.tools` is a function (MCP tools load at runtime). `lib/tools/workspace.ts` (with `lib/sandbox.ts`) is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a small change.
+Layout: `engine/` is the Mastra project, `app/` the Next.js studio (React Flow); both are npm workspaces. In `engine/`, `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them, and `lib/tools/` holds the tools (`schedule.ts`, `mcp.ts`, `approval.ts`, and `workspace.ts` for `read`/`write`/`edit`/`bash`). Tools live there, not in `agents/eigen/tools/`, because Mastra ignores discovered tool files when `config.tools` is a function (MCP tools load at runtime). `lib/tools/workspace.ts` (with `lib/sandbox.ts`) is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a small change.
 
 ## Known limits
 
 - File-based agents and schedules are Beta in Mastra, so versions are pinned exactly.
+- The `schedule` (reminder) tool works only for the primary agent; a specialist that lists it gets nothing. Use triggers to schedule a specialist.
+- The primary's own bot is built once at boot, so changing the root token or allow-list needs an engine restart. Specialist bots change live.
+- GitHub triggers, Telegram against the real API, and chat against a real model have only been exercised against fakes.
 - A reminder that fires within a second or two of the end of a conversation turn can be handed to that finishing run and lost.
 - The macOS profile, Telegram against the real API, and Ollama tool calling have only been exercised with fakes; try them on your Mac.
