@@ -264,6 +264,21 @@ describe("agent registry", () => {
     while (Date.now() < end && !events.some((e) => e.type === "agent.loaded" && e.id === "late")) await sleep(50);
     expect(mastra.agents.has("late")).toBe(true);
   });
+
+  it("drops an agent through fs.watch when the studio trashes its folder (a bare rename, no file events inside)", async () => {
+    const p = home();
+    addAgent(p, "gone");
+    const { reg, events, mastra, attach } = registry(p, 50);
+    await attach();
+    reg.watch();
+    await sleep(300);
+    expect(mastra.agents.has("gone")).toBe(true);
+
+    trashAgent(p, "gone");
+    const end = Date.now() + 8000;
+    while (Date.now() < end && !events.some((e) => e.type === "agent.removed" && e.id === "gone")) await sleep(50);
+    expect(mastra.agents.has("gone")).toBe(false);
+  });
 });
 
 describe("store", () => {

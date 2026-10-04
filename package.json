@@ -19,7 +19,12 @@
     "typecheck": "npm run typecheck -w @eigen/engine && npm run typecheck -w @eigen/app",
     "test": "npm test -w @eigen/engine",
     "setup": "npm run setup -w @eigen/engine",
-    "migrate": "npm run migrate -w @eigen/engine"
+    "migrate": "npm run migrate -w @eigen/engine",
+    "start": "npm run build -w @eigen/engine && npm run serve -w @eigen/engine",
+    "service": "npm run service -w @eigen/engine",
+    "test:e2e": "npm run test:e2e -w @eigen/engine",
+    "test:live": "npm run test:live -w @eigen/engine",
+    "test:security": "npm run test:security -w @eigen/app"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

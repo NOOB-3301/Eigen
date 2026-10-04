@@ -19,9 +19,18 @@ npm run setup        # creates ~/.eigen with defaults
 1. Create a bot with [@BotFather](https://t.me/BotFather) and put the token in `~/.eigen/.env` (`TELEGRAM_BOT_TOKEN`). Add `ANTHROPIC_API_KEY` if you use the cloud model.
 2. Message [@userinfobot](https://t.me/userinfobot) to get your numeric Telegram id, and put it in `~/.eigen/config.json` under `telegram.allowedUserIds`. Eigen refuses to start with an empty list.
 3. For the default local model: `ollama pull gemma4:e4b` and `ollama pull nomic-embed-text`, and run Ollama with a context length of at least `models.local.contextWindow` (28000).
-4. `npm start` (builds, then runs on `127.0.0.1:4111`).
+4. `npm start` (builds the engine, then runs it on `127.0.0.1:4111`).
+5. Optional, the studio: `npm run dev` runs the engine and the studio together; open http://127.0.0.1:4100. Or run just the studio with `npm run dev:app`.
 
 To run it as a background service: `npm run build && npm run service`, then run the `launchctl bootstrap` line it prints. The build bundles Mastra Studio, served at http://127.0.0.1:4111 (localhost only, no auth).
+
+## The team of agents
+
+`~/.eigen/.agents/<id>/` holds one folder per agent: `config.json` plus an `instructions.md`. Exactly one enabled agent is the **primary** (`eigen` by default): it owns the Telegram chat and delegates to the others. Shared things (the model list, Telegram, sandbox rules, MCP server list, memory defaults) stay in `~/.eigen/config.json`; an agent only names what it uses and overrides what it must, and the studio marks every value as inherited or overridden.
+
+The studio (`app/`, http://127.0.0.1:4100) shows the team as a graph and edits those files. The engine watches the folder and reloads only the agent that changed, so there is no restart. A file that becomes invalid never takes a running agent down; it keeps its last good version and shows as `stale`. Removing an agent in the studio moves its folder to `.agents/.trash/`.
+
+`npm run migrate` creates `.agents/eigen/` for an existing install (it never moves or deletes anything; the first engine start does the same when `.agents/` is empty). The studio only accepts requests from its own origin on loopback (`EIGEN_APP_ORIGINS` adds more); `npm run test:security` checks that against a running studio.
 
 ## Talking to it
 
@@ -104,10 +113,10 @@ npm run typecheck
 npm test            # unit tests, offline
 npm run test:e2e    # builds, then drives the built server through a fake Telegram and a fake model
 npm run test:live   # real ClawHub install through the agent (needs network)
-npm run dev         # Mastra Studio (hot reload), using ~/.eigen/.env
+npm run dev         # engine (Mastra Studio on 4111, hot reload) + agent studio (4100), using ~/.eigen/.env
 ```
 
-Layout: `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `memory.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them, and `lib/tools/` holds the tools (`schedule.ts`, `mcp.ts`, `approval.ts`, and `workspace.ts` for `read`/`write`/`edit`/`bash`). Tools live there, not in `agents/eigen/tools/`, because Mastra ignores discovered tool files when `config.tools` is a function (MCP tools load at runtime). `lib/tools/workspace.ts` (with `lib/sandbox.ts`) is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a small change.
+Layout: `engine/` is the Mastra project, `app/` the Next.js studio (React Flow); both are npm workspaces. In `engine/`, `src/mastra/agents/eigen` is the agent (`config.ts`, `instructions.ts`, `memory.ts`, `workspace.ts`, `schedules/`, built-in `skills/`); `agents/curator` writes the notes; `lib/` holds the small modules behind them, and `lib/tools/` holds the tools (`schedule.ts`, `mcp.ts`, `approval.ts`, and `workspace.ts` for `read`/`write`/`edit`/`bash`). Tools live there, not in `agents/eigen/tools/`, because Mastra ignores discovered tool files when `config.tools` is a function (MCP tools load at runtime). `lib/tools/workspace.ts` (with `lib/sandbox.ts`) is the only place that names the sandbox provider, so swapping to a remote desktop sandbox later is a small change.
 
 ## Known limits
 

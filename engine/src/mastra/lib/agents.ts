@@ -307,10 +307,11 @@ export function createAgentRegistry(opts: RegistryOptions) {
 
   const sync = (reloadRoot = false) => (queue = queue.then(() => reconcile(reloadRoot)).catch((e) => log("agent sync failed", e)));
 
-  /** Only config.json / instruction files one level down matter; agents writing in their own sandbox must not trigger scans. */
+  /** Only an agent folder appearing, disappearing or being renamed (one segment), and its config.json / instruction files (two) matter; agents writing in their own sandbox must not trigger scans. */
   const relevant = (rel: string) => {
     const parts = rel.split(sep);
-    return parts.length === 2 && !ignoredDir(parts[0]!) && /\.(json|md)$/.test(parts[1]!);
+    if (ignoredDir(parts[0]!)) return false;
+    return parts.length === 1 || (parts.length === 2 && /\.(json|md)$/.test(parts[1]!));
   };
 
   /** Debounced; a root change anywhere in the burst makes the whole burst a root reload. */
