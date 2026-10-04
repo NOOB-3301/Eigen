@@ -1,13 +1,14 @@
 "use client";
 import { motion, AnimatePresence } from "motion/react";
-import { AlertTriangle, Blocks, ChevronRight, Crown, Plus } from "lucide-react";
+import { AlertTriangle, Blocks, ChevronRight, Plus } from "lucide-react";
 import type { FleetResponse } from "@/lib/types";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
 import { TelegramStateChip, telegramView } from "@/components/canvas/telegram-state";
+import { byAttention } from "@/components/fleet/summary";
 
-/** Phone layout: the canvas is too cramped below 640px, so the team is a list (primary first). */
+/** Phone layout: the canvas is too cramped below 640px, so the agents are a list (those with problems first). */
 export function AgentList({ fleet, onOpen, onBuild, onCreate }: { fleet: FleetResponse; onOpen: (id: string) => void; onBuild: (id: string) => void; onCreate: () => void }) {
-  const agents = [...fleet.agents].sort((a, b) => Number(b.primary) - Number(a.primary) || a.name.localeCompare(b.name));
+  const agents = byAttention(fleet.agents);
   return (
     <div className="h-full overflow-y-auto px-4 pt-[76px] pb-8">
       <ul className="space-y-2">
@@ -23,7 +24,6 @@ export function AgentList({ fleet, onOpen, onBuild, onCreate }: { fleet: FleetRe
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     <span className="truncate text-[14.5px] font-semibold text-ink">{a.name}</span>
-                    {a.primary && <Crown size={13} className="text-crown" aria-label="primary" />}
                   </span>
                   <span className="mt-0.5 flex items-center gap-2 text-[12.5px] text-ink-2">
                     <span className="truncate">{a.role}</span>

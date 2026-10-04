@@ -1,18 +1,16 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { createTool } from "@mastra/core/tools";
 import { LibSQLStore } from "@mastra/libsql";
+import { Memory } from "@mastra/memory";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { parseConfig, toMastraModel } from "../src/mastra/lib/config.ts";
-import { makeMemory } from "../src/mastra/lib/memory.ts";
+import { agentPaths, ensureAgentDirs } from "../src/mastra/lib/home.ts";
 import { AgentConfigSchema, resolveAgent } from "../src/mastra/lib/schema.ts";
 import { createTriggerManager, generateUnattended } from "../src/mastra/lib/triggers.ts";
 import { fakeClock } from "./helpers/fake-clock.ts";
 import { fakeLlm, type Turn } from "./helpers/fake-llm.ts";
-import { DEFAULTS, tmpHome } from "./helpers/home.ts";
+import { agentConfig, tmpHome } from "./helpers/home.ts";
 
 const closers: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -21,20 +19,13 @@ afterEach(async () => {
 
 const call = (name: string, args: Record<string, unknown>): Turn => ({ calls: [{ name, args }] });
 
-/** A real agent with memory and a tool that needs approval, behind a scripted model. */
+/** A real agent with its own memory (memory.db in its folder) and a tool that needs approval, behind a scripted model. */
 async function setup(turns: Turn[]) {
   const p = tmpHome();
   const llm = await fakeLlm(turns);
   closers.push(llm.close);
-  const example = JSON.parse(readFileSync(`${DEFAULTS}/config.example.json`, "utf8"));
-  const cfg = parseConfig({
-    ...example,
-    telegram: { ...example.telegram, allowedUserIds: [7] },
-    models: { local: { id: "fake/model", url: llm.url } },
-    defaultModel: "local",
-    curatorModel: undefined,
-    memory: { lastMessages: 5, semanticRecall: { topK: 1, messageRange: 1 }, embedder: { id: "fake/embed", url: llm.url } },
-  });
+  const a = agentPaths(p, "t");
+  ensureAgentDirs(a);
   const ran: string[] = [];
   const risky = createTool({
     id: "risky",
@@ -44,13 +35,14 @@ async function setup(turns: Turn[]) {
     execute: async ({ what }) => (ran.push(what), { done: what }),
   });
   const safe = createTool({ id: "safe", description: "needs no yes", inputSchema: z.object({ what: z.string() }), execute: async ({ what }) => (ran.push(`safe:${what}`), { done: what }) });
-  const agent = new Agent({ id: "t", name: "t", instructions: "you are t", model: toMastraModel(cfg.models.local!), memory: makeMemory(p, cfg), tools: { risky, safe } });
-  const mastra = new Mastra({ agents: { t: agent }, storage: new LibSQLStore({ id: "t", url: `file:${join(p.dataDir, "t.db")}` }) });
+  const memory = new Memory({ storage: new LibSQLStore({ id: "t-memory", url: `file:${a.memoryDbFile}` }), options: { lastMessages: 5 } });
+  const agent = new Agent({ id: "t", name: "t", instructions: "you are t", model: { id: "fake/model", url: llm.url }, memory, tools: { risky, safe } });
+  const mastra = new Mastra({ agents: { t: agent }, storage: new LibSQLStore({ id: "engine", url: `file:${p.engineDbFile}` }) });
   const toolMessages = () => llm.requests.flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => String(m.content)));
-  return { p, cfg, llm, ran, agent: mastra.getAgent("t"), mastra, toolMessages };
+  return { p, llm, ran, agent: mastra.getAgent("t"), mastra, toolMessages };
 }
 
-const input = (agent: Agent, o: Partial<Parameters<typeof generateUnattended>[0]> = {}) => ({ agent, prompt: "do the thing", threadId: "trigger-t-daily", resourceId: "agent-t", maxSteps: 6, signal: new AbortController().signal, ...o });
+const input = (agent: Agent, o: Partial<Parameters<typeof generateUnattended>[0]> = {}) => ({ agent, prompt: "do the thing", threadId: "trigger-t-daily", resourceId: "telegram:7", maxSteps: 6, signal: new AbortController().signal, ...o });
 
 describe("an unattended run (real agent, scripted model)", () => {
   it("declines a tool call that needs approval instead of hanging, tells the model, and carries on to an answer", async () => {
@@ -69,7 +61,7 @@ describe("an unattended run (real agent, scripted model)", () => {
     expect(ran).toEqual(["safe:a"]);
     expect(llm.requests).toHaveLength(4);
     const thread = await (await agent.getMemory())!.getThreadById({ threadId: "trigger-t-daily" });
-    expect(thread).toMatchObject({ id: "trigger-t-daily", resourceId: "agent-t" });
+    expect(thread).toMatchObject({ id: "trigger-t-daily", resourceId: "telegram:7" });
   });
 
   it("is cut off by the abort signal while the model call hangs", async () => {
@@ -80,9 +72,9 @@ describe("an unattended run (real agent, scripted model)", () => {
   });
 
   it("through the trigger manager: the run is ok, the reply says what was declined, and nothing was executed", async () => {
-    const { agent, ran, p, cfg } = await setup([call("risky", { what: "rm everything" }), { text: "I could not do that." }]);
-    const resolved = resolveAgent(AgentConfigSchema.parse({ id: "t", name: "t", role: "r", description: "d", memory: { scope: "isolated" }, triggers: [{ id: "daily", type: "cron", cron: "0 9 * * *", timezone: "UTC", prompt: "Do the daily thing", deliverToTelegram: false }] }), cfg);
-    const mgr = createTriggerManager({ paths: p, clock: fakeClock("2026-10-04T08:00:00Z").clock, timezone: () => "UTC", agentOf: () => agent, botOf: () => undefined });
+    const { agent, ran, p } = await setup([call("risky", { what: "rm everything" }), { text: "I could not do that." }]);
+    const resolved = resolveAgent(AgentConfigSchema.parse(agentConfig("t", { triggers: [{ id: "daily", type: "cron", cron: "0 9 * * *", prompt: "Do the daily thing", deliverToTelegram: false }] })), "UTC");
+    const mgr = createTriggerManager({ paths: p, envOf: () => new Map(), clock: fakeClock("2026-10-04T08:00:00Z").clock, agentOf: () => agent, botOf: () => undefined });
     closers.push(() => mgr.close());
     mgr.sync("t", resolved);
     const res = await mgr.runNow("t", "daily");

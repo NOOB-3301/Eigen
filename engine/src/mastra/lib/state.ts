@@ -1,27 +1,28 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { Config } from "./config.ts";
-import type { HomePaths } from "./home.ts";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import type { ResolvedAgent } from "./schema.ts";
 
+/** One agent's choices made from chat (/model, /verbose), in its data/state.json. They survive restarts and reloads; config.json is never touched. */
 export type State = { model?: string; verbose?: boolean };
 
-const file = (p: HomePaths) => join(p.dataDir, "state.json");
-
-/** Choices made from chat (/model, /verbose); they survive restarts. */
-export function readState(p: HomePaths): State {
+export function readState(file: string): State {
   try {
-    return JSON.parse(readFileSync(file(p), "utf8"));
+    const s = JSON.parse(readFileSync(file, "utf8"));
+    return s && typeof s === "object" ? s : {};
   } catch {
     return {};
   }
 }
 
-export function patchState(p: HomePaths, patch: State) {
-  const next = { ...readState(p), ...patch };
-  writeFileSync(file(p), JSON.stringify(next));
+export function patchState(file: string, patch: State) {
+  const next = { ...readState(file), ...patch };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(next));
   return next;
 }
 
-/** The model chosen with /model, unless config.json no longer has it; otherwise `base` (the primary's own `model`), then the root default. */
-export const activeModel = (cfg: Config, state: State, base?: string) =>
-  state.model && state.model in cfg.models ? state.model : base && base in cfg.models ? base : cfg.defaultModel;
+/** The model the agent uses now: the one chosen with /model while its config still has it, else its configured `model`. */
+export const activeModelKey = (r: Pick<ResolvedAgent, "models" | "modelKey">, stateFile: string): string => {
+  const chosen = readState(stateFile).model;
+  return chosen && Object.hasOwn(r.models, chosen) ? chosen : r.modelKey;
+};

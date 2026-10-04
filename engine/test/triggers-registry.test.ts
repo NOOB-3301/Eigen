@@ -3,45 +3,24 @@ import { join } from "node:path";
 import type { Agent } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
 import { afterEach, describe, expect, it } from "vitest";
-import { createAgentRegistry, type AgentFactory, type AgentRegistry } from "../src/mastra/lib/agents.ts";
-import { reloadConfig } from "../src/mastra/lib/config.ts";
+import { createAgentRegistry, type AgentRegistry } from "../src/mastra/lib/agents.ts";
 import { setSecret } from "../src/mastra/lib/envfile.ts";
-import type { HomePaths } from "../src/mastra/lib/home.ts";
+import type { AgentFactory } from "../src/mastra/lib/factory.ts";
+import { agentPaths, type HomePaths } from "../src/mastra/lib/home.ts";
 import type { AgentConfigInput, AgentEvent, TriggerInput } from "../src/mastra/lib/schema.ts";
 import type { TelegramBot } from "../src/mastra/lib/telegram.ts";
-import type { Mcp } from "../src/mastra/lib/tools/mcp.ts";
 import { seenFile } from "../src/mastra/lib/trigger-runs.ts";
 import { fakeGithub, pull } from "./helpers/fake-github.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { tmpHome, writeAgent } from "./helpers/home.ts";
+import { sleep, until } from "./helpers/registry.ts";
 
 const TOKEN = "gho_Tok3nThatMustNeverLeak0123456789";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function until(check: () => boolean, ms = 8000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (check()) return;
-    await sleep(25);
-  }
-  throw new Error("timed out");
-}
 
-function home() {
-  const p = tmpHome();
-  const seeded = JSON.parse(readFileSync(p.configFile, "utf8"));
-  writeFileSync(p.configFile, JSON.stringify({ ...seeded, telegram: { tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [7] } }));
-  process.env.EIGEN_HOME = p.home;
-  reloadConfig();
-  return p;
-}
-
-function addAgent(p: HomePaths, id: string, patch: Partial<AgentConfigInput> = {}) {
-  const dir = join(p.agentsDir, id);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "instructions.md"), `You are ${id}.`);
-  writeFileSync(join(dir, "config.json"), JSON.stringify({ id, name: id, role: "specialist", description: `The ${id}.`, ...patch }));
-}
-
-const stubMcp = { load: async () => ({ tools: {}, errors: {}, servers: [] }), state: () => ({ tools: {}, errors: {}, servers: [] }), tools: () => ({}), close: async () => undefined } as unknown as Mcp;
+const home = tmpHome;
+/** Every agent here has a GitHub token in its own .env unless the test says otherwise. */
+const addAgent = (p: HomePaths, id: string, patch: Partial<AgentConfigInput> = {}, env: Record<string, string> = { GITHUB_TOKEN: TOKEN }) =>
+  writeAgent(p, id, { telegram: { allowedUserIds: [7] }, ...patch }, { env });
+const seen = (p: HomePaths, id: string) => JSON.parse(readFileSync(seenFile(agentPaths(p, id), "prs"), "utf8")).prs;
 
 const ghTrigger = (o: Record<string, unknown> = {}) => ({ id: "prs", type: "github-pr", repo: "acme/app", tokenEnv: "GITHUB_TOKEN", prompt: "Review {{pr.title}}", intervalSec: 60, ...o }) as TriggerInput;
 const cronTrigger = (o: Record<string, unknown> = {}) => ({ id: "daily", type: "cron", cron: "0 9 * * *", timezone: "UTC", prompt: "Daily", ...o }) as TriggerInput;
@@ -51,11 +30,10 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function setup(p: HomePaths, env: NodeJS.ProcessEnv = {}) {
+async function setup(p: HomePaths) {
   const gh = await fakeGithub();
   closers.push(gh.close);
   gh.setPulls("acme/app", [pull(1)]);
-  const fullEnv: NodeJS.ProcessEnv = { GITHUB_TOKEN: TOKEN, GITHUB_API_BASE_URL: gh.url, ...env };
   const sent: Array<{ chat: string; text: string }> = [];
   const bot = {
     state: () => ({ state: "polling" }),
@@ -65,12 +43,14 @@ async function setup(p: HomePaths, env: NodeJS.ProcessEnv = {}) {
   } as unknown as TelegramBot;
   const stopped: string[] = [];
   const prompts: string[] = [];
-  const factory: AgentFactory = async (r) => ({
-    agent: { id: r.id, name: r.name, generate: async (prompt: string) => (prompts.push(prompt), { text: `reply from ${r.id}`, finishReason: "stop" }) } as unknown as Agent,
-    telegram: r.telegram.enabled ? bot : undefined,
+  /** What the agent answers; a test can make it quote a secret. */
+  const reply = { text: (id: string) => `reply from ${id}` };
+  const factory: AgentFactory = async (r, ctx) => ({
+    agent: { id: r.id, name: r.name, generate: async (prompt: string) => (prompts.push(prompt), { text: reply.text(r.id), finishReason: "stop" }) } as unknown as Agent,
+    telegram: ctx.telegramToken ? bot : undefined,
     dispose: async () => void stopped.push(r.id),
   });
-  const reg: AgentRegistry = createAgentRegistry({ paths: p, rootMcp: stubMcp, factory, debounceMs: 40, env: fullEnv });
+  const reg: AgentRegistry = createAgentRegistry({ paths: p, factory, debounceMs: 40, disposeGraceMs: 0, timezone: () => "UTC", triggers: { githubApi: gh.url } });
   closers.push(() => reg.close());
   const events: AgentEvent[] = [];
   reg.events.on("event", (e) => events.push(e));
@@ -78,7 +58,7 @@ async function setup(p: HomePaths, env: NodeJS.ProcessEnv = {}) {
   await reg.attach(mastra as unknown as Mastra);
   const triggers = (id = "reviewer") => reg.detail(id)?.runtime.triggers;
   const triggerEvents = (id = "reviewer") => events.flatMap((e) => (e.type === "agent.trigger" && e.id === id ? [e.trigger] : []));
-  return { reg, gh, env: fullEnv, sent, prompts, events, stopped, triggers, triggerEvents };
+  return { reg, gh, sent, prompts, reply, events, stopped, triggers, triggerEvents };
 }
 
 describe("triggers in the agent registry", () => {
@@ -89,11 +69,13 @@ describe("triggers in the agent registry", () => {
     await until(() => triggers()?.find((t) => t.id === "prs")?.state === "idle" && gh.pollsOf().length === 1);
     expect(triggers()!.map((t) => [t.id, t.type, t.state])).toEqual([["prs", "github-pr", "idle"], ["off", "cron", "disabled"]]);
     expect(triggers()![0]!.nextRunAt).toBeDefined();
-    expect(JSON.parse(readFileSync(seenFile(p, "reviewer", "prs"), "utf8")).prs).toEqual({ 1: "sha-1-a" });
+    expect(seen(p, "reviewer")).toEqual({ 1: "sha-1-a" });
     expect(triggerEvents().length).toBeGreaterThan(0);
     expect(JSON.stringify([triggerEvents(), reg.detail("reviewer"), reg.summaries(), reg.snapshot()])).not.toContain(TOKEN);
     // an agent with no triggers has no `triggers` key at all
-    expect(reg.detail("eigen")!.runtime.triggers).toBeUndefined();
+    addAgent(p, "plain");
+    await reg.reload();
+    expect(reg.detail("plain")!.runtime.triggers).toBeUndefined();
   });
 
   it("an edit that does not touch a trigger leaves it running; an edit to the trigger restarts it with what it had seen", async () => {
@@ -114,7 +96,7 @@ describe("triggers in the agent registry", () => {
     reg.reload();
     await until(() => gh.pollsOf().length === 2); // restarted: polls at once
     await until(() => triggers()![0]!.state === "idle" && triggers()![0]!.nextRunAt !== undefined);
-    expect(JSON.parse(readFileSync(seenFile(p, "reviewer", "prs"), "utf8")).prs).toEqual({ 1: "sha-1-a", 2: "sha-2-a" });
+    expect(seen(p, "reviewer")).toEqual({ 1: "sha-1-a", 2: "sha-2-a" });
     expect(triggerEvents().at(-1)).toMatchObject({ id: "prs", state: "idle" });
   });
 
@@ -164,24 +146,25 @@ describe("triggers in the agent registry", () => {
     expect(reg.triggerRuns("reviewer", 10)).toBeUndefined();
   });
 
-  it("a token added to .env while the engine runs starts a trigger that was waiting for it", async () => {
+  it("a token added to the agent's .env while the engine runs starts a trigger that was waiting for it; the engine's environment never counts", async () => {
     const p = home();
-    addAgent(p, "reviewer", { triggers: [ghTrigger()] });
-    const { reg, gh, triggers, env } = await setup(p, { GITHUB_TOKEN: undefined });
+    addAgent(p, "reviewer", { triggers: [ghTrigger()] }, {});
+    process.env.GITHUB_TOKEN = "gho_fromTheShellNeverUsed000000000000";
+    const { reg, gh, triggers } = await setup(p).finally(() => delete process.env.GITHUB_TOKEN);
     reg.watch();
     await until(() => triggers()?.[0]?.state === "missing-token");
     expect(gh.requests).toEqual([]);
-    setSecret(p, "GITHUB_TOKEN", TOKEN);
+    setSecret(agentPaths(p, "reviewer").envFile, "GITHUB_TOKEN", TOKEN);
     await until(() => triggers()?.[0]?.state === "idle");
-    expect(env.GITHUB_TOKEN).toBe(TOKEN);
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
     expect(gh.pollsOf()).toHaveLength(1);
     expect(gh.pollsOf()[0]!.headers.authorization).toBe(`Bearer ${TOKEN}`);
   });
 
   it("runs a trigger now through the registry, delivers on the agent's own bot, and lists the run newest first", async () => {
     const p = home();
-    addAgent(p, "reviewer", { telegram: { enabled: true, tokenEnv: "TELEGRAM_BOT_TOKEN_REVIEWER" }, triggers: [cronTrigger()] });
-    const { reg, sent, prompts } = await setup(p, { TELEGRAM_BOT_TOKEN_REVIEWER: "55:reviewer-bot" });
+    addAgent(p, "reviewer", { telegram: { enabled: true, allowedUserIds: [7] }, triggers: [cronTrigger()] }, { TELEGRAM_BOT_TOKEN: "55:reviewer-bot" });
+    const { reg, sent, prompts } = await setup(p);
     const res = await reg.runTrigger("reviewer", "daily");
     expect(res).toMatchObject({ ok: true, run: { subject: "manual", status: "ok", reply: "reply from reviewer", delivered: true } });
     expect(prompts[0]!.split("\n\n")[0]).toBe("Daily");
@@ -194,12 +177,14 @@ describe("triggers in the agent registry", () => {
     expect(reg.runTrigger("reviewer", "missing")).toBeUndefined();
   });
 
-  it("knows which env variables a github-pr trigger uses, for the check endpoint", async () => {
+  it("scrubs every value in the agent's .env out of a run's reply, its record and what reaches Telegram", async () => {
     const p = home();
-    addAgent(p, "reviewer", { triggers: [ghTrigger({ tokenEnv: "REVIEW_PAT" }), cronTrigger()] });
-    addAgent(p, "other", { triggers: [ghTrigger({ tokenEnv: "OTHER_PAT" })] });
-    const { reg } = await setup(p);
-    expect(reg.githubEnvNames().sort()).toEqual(["OTHER_PAT", "REVIEW_PAT"]);
+    addAgent(p, "reviewer", { telegram: { enabled: true, allowedUserIds: [7] }, triggers: [cronTrigger()] }, { TELEGRAM_BOT_TOKEN: "55:reviewer-bot", SOME_API_SECRET: "plainvalue-without-a-shape" });
+    const { reg, sent, reply } = await setup(p);
+    reply.text = () => "the env says plainvalue-without-a-shape and 55:reviewer-bot";
+    const res = await reg.runTrigger("reviewer", "daily");
+    expect(res!.run!.reply).toBe("the env says [redacted] and [redacted]");
+    expect(JSON.stringify([sent, reg.triggerRuns("reviewer", 10)])).not.toMatch(/plainvalue|55:reviewer/);
   });
 
   it("close() stops every trigger", async () => {

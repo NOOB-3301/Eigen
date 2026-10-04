@@ -1,14 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Agent } from "@mastra/core/agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/mastra/lib/config.ts";
+import { agentPaths } from "../src/mastra/lib/home.ts";
 import { AgentConfigSchema, resolveAgent, type Trigger, type TriggerInput, type TriggerRuntime } from "../src/mastra/lib/schema.ts";
 import type { TelegramBot } from "../src/mastra/lib/telegram.ts";
-import { chunkText, createTriggerManager, triggerResource, type UnattendedRun } from "../src/mastra/lib/triggers.ts";
+import { chunkText, createTriggerManager, userResource, type UnattendedRun } from "../src/mastra/lib/triggers.ts";
 import { runsFile, seenFile } from "../src/mastra/lib/trigger-runs.ts";
 import { fakeClock } from "./helpers/fake-clock.ts";
 import { fakeGithub, pull, type FakePull } from "./helpers/fake-github.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { agentConfig, tmpHome } from "./helpers/home.ts";
 
 const TOKEN = "gho_Tok3nThatMustNeverLeak0123456789";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -46,33 +46,32 @@ function fakeBot(initial: "polling" | "starting" | "error" = "polling") {
   return { bot, sent, failFor, setState: (s: string) => (state = s) };
 }
 
-type Options = { start?: string; env?: NodeJS.ProcessEnv; runAgent?: (r: UnattendedRun) => Promise<{ text: string; declined: string[] }>; bot?: ReturnType<typeof fakeBot> | null; secrets?: string[]; timezone?: string; runTimeoutMs?: number };
+type Options = { start?: string; env?: Record<string, string | undefined>; githubApi?: string; runAgent?: (r: UnattendedRun) => Promise<{ text: string; declined: string[] }>; bot?: ReturnType<typeof fakeBot> | null; timezone?: string; runTimeoutMs?: number };
 
 async function rig(o: Options = {}) {
   const p = tmpHome();
-  const root = loadConfig(p.configFile);
   const gh = await fakeGithub();
   closers.push(gh.close);
   const fc = fakeClock(o.start ?? "2026-10-04T08:59:00Z");
-  const env: NodeJS.ProcessEnv = { GITHUB_TOKEN: TOKEN, GITHUB_API_BASE_URL: gh.url, ...o.env };
+  /** The agent's .env, as its running version read it. */
+  const env = new Map(Object.entries({ GITHUB_TOKEN: TOKEN, ...o.env }).filter((e): e is [string, string] => e[1] !== undefined));
   const runs: UnattendedRun[] = [];
   const runAgent = o.runAgent ?? (async (r: UnattendedRun) => (runs.push(r), { text: `Reviewed (${runs.length})`, declined: [] }));
   const logs: string[] = [];
   const events: Array<{ id: string; trigger: TriggerRuntime }> = [];
   const telegram = o.bot === undefined ? fakeBot() : o.bot;
-  /** The root time zone, which a test can change like an edit to config.json. */
+  /** The agent's time zone (config.timezone, or the machine's), which a test can change like an edit to config.json. */
   const zone = { current: o.timezone ?? "Asia/Kolkata" };
   const make = () => {
     const mgr = createTriggerManager({
       paths: p,
-      env,
+      envOf: () => env,
+      githubApi: o.githubApi ?? gh.url,
       clock: fc.clock,
       log: (m) => logs.push(m),
       emit: (id, trigger) => events.push({ id, trigger }),
-      timezone: () => zone.current,
       agentOf: () => ({}) as Agent,
       botOf: () => telegram?.bot,
-      secretsOf: () => o.secrets ?? [],
       runAgent,
       runTimeoutMs: o.runTimeoutMs,
     });
@@ -80,7 +79,7 @@ async function rig(o: Options = {}) {
     return mgr;
   };
   const resolved = (triggers: TriggerInput[], extra: Record<string, unknown> = {}) =>
-    resolveAgent(AgentConfigSchema.parse({ id: "reviewer", name: "Reviewer", role: "reviewer", description: "Reviews.", telegram: { allowedUserIds: [7, 8] }, triggers, ...extra }), root);
+    resolveAgent(AgentConfigSchema.parse(agentConfig("reviewer", { telegram: { allowedUserIds: [7, 8] }, triggers, ...extra })), zone.current);
   const mgr = make();
   const rt = (i = 0) => mgr.runtimes("reviewer")![i]!;
   /** Fires what is due and waits until the trigger is idle again with its next time set (poll and every run it started are over). */
@@ -88,7 +87,7 @@ async function rig(o: Options = {}) {
     fc.advance(ms);
     await until(() => rt().nextRunAt !== undefined && rt().state !== "running");
   };
-  const allText = () => JSON.stringify({ logs, events, runtimes: mgr.runtimes("reviewer"), runs: mgr.runs("reviewer"), file: existsSync(runsFile(p, "reviewer")) ? readFileSync(runsFile(p, "reviewer"), "utf8") : "" });
+  const allText = () => JSON.stringify({ logs, events, runtimes: mgr.runtimes("reviewer"), runs: mgr.runs("reviewer"), file: existsSync(runsFile(agentPaths(p, "reviewer"))) ? readFileSync(runsFile(agentPaths(p, "reviewer")), "utf8") : "" });
   return { p, gh, fc, env, zone, runs, logs, events, telegram, mgr, make, resolved, rt, settle, allText };
 }
 
@@ -103,7 +102,7 @@ describe("github-pr polling", () => {
     expect(r.gh.pollsOf()).toHaveLength(1);
     expect(r.runs).toEqual([]);
     expect(r.rt()).toMatchObject({ id: "prs", type: "github-pr", state: "idle", nextRunAt: new Date(r.fc.now() + 60_000).toISOString() });
-    expect(JSON.parse(readFileSync(seenFile(r.p, "reviewer", "prs"), "utf8"))).toEqual({ repo: "acme/app", prs: { 1: "sha-1-a", 2: "sha-2-a" } });
+    expect(JSON.parse(readFileSync(seenFile(agentPaths(r.p, "reviewer"), "prs"), "utf8"))).toEqual({ repo: "acme/app", prs: { 1: "sha-1-a", 2: "sha-2-a" } });
   });
 
   it("fires once for a pull request that appears, with the placeholders filled and the event as data", async () => {
@@ -202,7 +201,7 @@ describe("github-pr polling", () => {
     await r.settle(60_000);
     expect(r.runs.map((x) => x.prompt.match(/"number":(\d+)/)![1])).toEqual(["9", "8", "7", "6", "5"]);
     expect(r.logs.some((l) => l.includes("running the newest 5 and skipping 3"))).toBe(true);
-    expect(Object.keys(JSON.parse(readFileSync(seenFile(r.p, "reviewer", "prs"), "utf8")).prs)).toHaveLength(9);
+    expect(Object.keys(JSON.parse(readFileSync(seenFile(agentPaths(r.p, "reviewer"), "prs"), "utf8")).prs)).toHaveLength(9);
     await r.settle(60_000);
     expect(r.runs).toHaveLength(5); // 2, 3 and 4 are not picked up later
   });
@@ -264,11 +263,11 @@ describe("github-pr polling", () => {
     r.gh.setPulls("acme/app", [pr(1)]);
     r.mgr.sync("reviewer", r.resolved([ghTrigger()]));
     await r.settle();
-    expect(r.rt()).toMatchObject({ state: "missing-token", error: "GITHUB_TOKEN is not set in .env" });
+    expect(r.rt()).toMatchObject({ state: "missing-token", error: "GITHUB_TOKEN is not set in this agent's keys" });
     await r.settle(60_000);
     expect(r.gh.requests).toEqual([]);
 
-    r.env.GITHUB_TOKEN = TOKEN;
+    r.env.set("GITHUB_TOKEN", TOKEN);
     r.mgr.sync("reviewer", r.resolved([ghTrigger()])); // what the registry does when the agent version changes
     await r.settle();
     expect(r.rt().state).toBe("idle");
@@ -344,7 +343,7 @@ describe("github-pr polling", () => {
     const bad = await fakeGithub({ token: "another-token" });
     closers.push(bad.close);
     bad.echoTokenInErrors();
-    const r = await rig({ env: { GITHUB_API_BASE_URL: bad.url } });
+    const r = await rig({ githubApi: bad.url });
     r.mgr.sync("reviewer", r.resolved([ghTrigger()]));
     await r.settle();
     expect(r.rt()).toMatchObject({ state: "error", error: expect.stringContaining("401") });
@@ -366,7 +365,7 @@ describe("cron", () => {
     expect(r.rt()).toMatchObject({ state: "idle", nextRunAt: "2026-10-05T03:30:00.000Z", lastRun: { subject: "cron 0 9 * * *", status: "ok", delivered: true } });
   });
 
-  it("uses the root time zone when the trigger names none", async () => {
+  it("uses the agent's time zone when the trigger names none", async () => {
     const r = await rig({ start: "2026-10-04T03:29:00Z", timezone: "UTC" });
     r.mgr.sync("reviewer", r.resolved([cronTrigger({ timezone: undefined })]));
     expect(r.rt().nextRunAt).toBe("2026-10-04T09:00:00.000Z");
@@ -447,12 +446,12 @@ describe("run now", () => {
     r.gh.setPulls("acme/app", [pr(1), pr(5), pr(3)]);
     r.mgr.sync("reviewer", r.resolved([ghTrigger()]));
     await r.settle();
-    const seenBefore = readFileSync(seenFile(r.p, "reviewer", "prs"), "utf8");
+    const seenBefore = readFileSync(seenFile(agentPaths(r.p, "reviewer"), "prs"), "utf8");
     r.gh.addPull("acme/app", pr(6)); // the newest
     const res = await r.mgr.runNow("reviewer", "prs");
     expect(res).toMatchObject({ ok: true, run: { subject: "manual acme/app#6" } });
     expect(r.runs[0]!.prompt.split("\n\n")[0]).toBe("Review Change 6");
-    expect(readFileSync(seenFile(r.p, "reviewer", "prs"), "utf8")).toBe(seenBefore);
+    expect(readFileSync(seenFile(agentPaths(r.p, "reviewer"), "prs"), "utf8")).toBe(seenBefore);
     // #6 is still unseen, so the poller fires for it as a real event
     await r.settle(60_000);
     expect(r.runs).toHaveLength(2);
@@ -470,7 +469,7 @@ describe("run now", () => {
 
     const noToken = await rig({ env: { GITHUB_TOKEN: undefined } });
     noToken.mgr.sync("reviewer", noToken.resolved([ghTrigger()]));
-    expect(await noToken.mgr.runNow("reviewer", "prs")).toEqual({ ok: false, error: "GITHUB_TOKEN is not set in .env" });
+    expect(await noToken.mgr.runNow("reviewer", "prs")).toEqual({ ok: false, error: "GITHUB_TOKEN is not set in this agent's keys" });
   });
 
   it("refuses to start a second run while one is going, and a poll that comes due then is skipped and logged", async () => {
@@ -503,16 +502,12 @@ describe("run now", () => {
 });
 
 describe("a run", () => {
-  it("scopes memory like the agent's chats: the user's own resource when memory is shared, a private one when isolated", async () => {
-    const shared = await rig();
-    shared.mgr.sync("reviewer", shared.resolved([cronTrigger()], { memory: { scope: "shared" } }));
-    await shared.mgr.runNow("reviewer", "daily");
-    expect(shared.runs[0]).toMatchObject({ threadId: "trigger-reviewer-daily", resourceId: "telegram:7" });
-    const isolated = await rig();
-    isolated.mgr.sync("reviewer", isolated.resolved([cronTrigger()]));
-    await isolated.mgr.runNow("reviewer", "daily");
-    expect(isolated.runs[0]).toMatchObject({ threadId: "trigger-reviewer-daily", resourceId: "agent-reviewer" });
-    expect(triggerResource({ id: "x", memory: { scope: "shared" }, telegram: { allowedUserIds: [] } } as never)).toBe("agent-x");
+  it("runs in its own thread, on the resource of the agent's first Telegram user (the same person as in its chats)", async () => {
+    const r = await rig();
+    r.mgr.sync("reviewer", r.resolved([cronTrigger()]));
+    await r.mgr.runNow("reviewer", "daily");
+    expect(r.runs[0]).toMatchObject({ threadId: "trigger-reviewer-daily", resourceId: "telegram:7" });
+    expect(userResource({ telegram: { allowedUserIds: [] } } as never)).toBe("studio");
   });
 
   it("uses the agent's maxSteps", async () => {
@@ -552,7 +547,7 @@ describe("a run", () => {
 
   it("says so when the agent is not available", async () => {
     const r = await rig();
-    const mgr = createTriggerManager({ paths: r.p, env: {}, clock: r.fc.clock, timezone: () => "UTC", agentOf: () => undefined, botOf: () => undefined });
+    const mgr = createTriggerManager({ paths: r.p, envOf: () => new Map(), clock: r.fc.clock, agentOf: () => undefined, botOf: () => undefined });
     closers.push(() => mgr.close());
     mgr.sync("reviewer", r.resolved([cronTrigger()]));
     expect(await mgr.runNow("reviewer", "daily")).toMatchObject({ ok: false, error: expect.stringContaining("the agent is not available") });

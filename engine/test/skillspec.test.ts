@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { reconcileSkills } from "../src/mastra/lib/skills.ts";
 import { skillFolderName, validateSkillText } from "../src/mastra/lib/skillspec.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
 const fm = (lines: string, body = "Do the thing.\n") => `---\n${lines}\n---\n\n${body}`;
 
@@ -43,7 +43,7 @@ describe("validateSkillText", () => {
   // The engine's own check (lib/skills.ts) runs on the agent's installed skills: it leaves a skill alone only if it would load as is.
   // Whatever the editor calls valid must be exactly what the engine leaves alone, and vice versa.
   it.each(CASES)("agrees with the engine's reconcileSkills: %s", (_label, slug, text) => {
-    const p = tmpHome();
+    const p = tmpAgent().paths;
     mkdirSync(join(p.sandboxSkillsDir, slug), { recursive: true });
     writeFileSync(join(p.sandboxSkillsDir, slug, "SKILL.md"), text);
     const report = reconcileSkills(p);

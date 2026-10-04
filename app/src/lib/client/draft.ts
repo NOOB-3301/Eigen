@@ -13,7 +13,7 @@ export function getPath(o: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((cur, k) => (cur && typeof cur === "object" ? (cur as Obj)[k] : undefined), o);
 }
 
-/** Immutable set; `undefined` deletes the key (that is how a field goes back to inheriting) and prunes emptied objects. */
+/** Immutable set; `undefined` deletes the key (that is how a field goes back to its schema default) and prunes emptied objects. */
 export function setPath(o: Obj, path: string, value: unknown): Obj {
   const [k, ...rest] = path.split(".") as [string, ...string[]];
   const copy: Obj = { ...o };

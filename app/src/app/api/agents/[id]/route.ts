@@ -22,7 +22,7 @@ export async function GET(req: Request, ctx: RouteContext<"/api/agents/[id]">) {
   }
 }
 
-/** Moves the folder to .agents/.trash (never erased). The response does not include the path. */
+/** Moves the whole folder to agents/.trash (never erased); the engine notices and stops the agent. The response does not include the path. */
 export async function DELETE(req: Request, ctx: RouteContext<"/api/agents/[id]">) {
   const blocked = guard(req);
   if (blocked) return blocked;

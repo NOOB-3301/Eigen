@@ -11,7 +11,7 @@ const Session = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 /** Loose on purpose: the engine validates the message itself. This only refuses what is obviously not a chat turn before it costs a hop. */
 const Turn = z.object({ session: Session, message: z.object({ id: z.string(), role: z.enum(["user", "assistant"]), parts: z.array(z.unknown()) }) });
 
-/** `code` lets the panel tell "engine is offline" from "agent is disabled" without parsing prose. */
+/** `code` lets the panel tell "the engine is offline" from "agent is disabled" without parsing prose. */
 export type ChatFailure = { ok: false; code: "offline" | "unavailable" | "bad-request" | "too-large" | "failed"; error: string };
 const failure = (status: number, code: ChatFailure["code"], error: string) => json({ ok: false, code, error } satisfies ChatFailure, status);
 
@@ -76,7 +76,7 @@ export async function proxyChat(req: Request, agentId: string): Promise<Response
   if (!turn.success) return failure(400, "bad-request", turn.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "));
 
   const base = engineBase();
-  if (!base) return failure(503, "offline", "engine is offline");
+  if (!base) return failure(503, "offline", "the engine is offline");
   let res: Response;
   try {
     res = await fetch(`${base}/eigen/chat/${agentId}`, {
@@ -88,7 +88,7 @@ export async function proxyChat(req: Request, agentId: string): Promise<Response
       signal: req.signal,
     });
   } catch (e) {
-    return isRefused(e) ? failure(503, "offline", "engine is offline") : failure(499, "failed", "request cancelled");
+    return isRefused(e) ? failure(503, "offline", "the engine is offline") : failure(499, "failed", "request cancelled");
   }
   if (!res.ok) return refusal(res);
   if (!res.body || !res.headers.get("content-type")?.includes("text/event-stream")) return failure(502, "failed", "the engine sent an unexpected answer");
@@ -101,21 +101,20 @@ export async function chatHistory(agentId: string, session: string | null): Prom
   if (!AgentId.safeParse(agentId).success) return failure(400, "bad-request", "invalid agent id");
   if (!Session.safeParse(session).success) return failure(400, "bad-request", "invalid session id");
   const base = engineBase();
-  if (!base) return failure(503, "offline", "engine is offline");
+  if (!base) return failure(503, "offline", "the engine is offline");
   let res: Response;
   try {
     res = await fetch(`${base}/eigen/chat/${agentId}/${session}`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
   } catch (e) {
-    return isRefused(e) ? failure(503, "offline", "engine is offline") : failure(504, "failed", "the engine did not answer in time");
+    return isRefused(e) ? failure(503, "offline", "the engine is offline") : failure(504, "failed", "the engine did not answer in time");
   }
   if (!res.ok) return refusal(res);
   const raw = (await res.json().catch(() => null)) as Partial<ChatHistoryResponse> | null;
-  if (!raw || !Array.isArray(raw.messages) || typeof raw.model !== "string" || (raw.memory?.scope !== "shared" && raw.memory?.scope !== "isolated"))
-    return failure(502, "failed", "the engine sent an unexpected answer");
-  const user = raw.memory.telegramUserId;
+  if (!raw || !Array.isArray(raw.messages) || typeof raw.model !== "string") return failure(502, "failed", "the engine sent an unexpected answer");
+  const user = raw.memory?.telegramUserId;
   return json({
     messages: raw.messages,
     model: raw.model,
-    memory: { scope: raw.memory.scope, ...(typeof user === "number" && { telegramUserId: user }) },
+    memory: typeof user === "number" ? { telegramUserId: user } : {},
   } satisfies ChatHistoryResponse);
 }

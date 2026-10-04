@@ -2,9 +2,10 @@
  * Chat with an agent from the studio, as the AI SDK UI-message stream that `useChat` reads (Mastra's handleChatStream, the handler
  * behind chatRoute). The studio's Next server is the only caller: it proxies the browser's request here.
  *
- * Memory: the primary and "shared" agents use the resource Mastra's Telegram channel gives the user (`telegram:<userId>`), so working
- * memory and recall carry over between the studio and Telegram; an "isolated" agent gets a resource of its own. The thread is always a
- * separate studio thread per session, so the two conversations never interleave.
+ * Memory: the studio chat uses the resource Mastra's Telegram channel gives the agent's first allowed user (`telegram:<userId>`, or `studio`
+ * for an agent without one), so working memory and recall carry over between the studio and Telegram. Every agent has its own storage, so
+ * that resource never reaches another agent's memory. The thread is a separate studio thread per session (`studio:<session>`), so the two
+ * conversations never interleave. An agent with storage off keeps nothing: no memory is passed and there is no history.
  *
  * The body is rebuilt here instead of being spread into agent.stream() the way chatRoute does it: a caller that could set `memory`,
  * `instructions` or `tools` could read any thread or rewrite the agent.
@@ -18,11 +19,11 @@ import type { Mastra } from "@mastra/core/mastra";
 import { createUIMessageStreamResponse, type UIMessage, type UIMessageChunk } from "ai";
 import { truncate } from "lodash-es";
 import { z } from "zod";
-import type { Config } from "./config.ts";
-import type { HomePaths } from "./home.ts";
-import { AgentId, type GetAgentRuntimeResponse, type ResolvedAgent } from "./schema.ts";
+import { agentPaths, type HomePaths } from "./home.ts";
+import { AgentId, type ChatHistoryResponse, type GetAgentRuntimeResponse, type ResolvedAgent } from "./schema.ts";
 import { redact, redactDeep } from "./secrets.ts";
-import { activeModel, readState } from "./state.ts";
+import { activeModelKey } from "./state.ts";
+import { userResource } from "./triggers.ts";
 
 export const CHAT_MAX_BODY = 1_000_000;
 const HISTORY_LIMIT = 100;
@@ -58,20 +59,9 @@ const ApprovalMessage = z
 export const ChatRequest = z.object({ session: ChatSession, message: z.union([UserMessage, ApprovalMessage]) });
 export type ChatRequest = z.infer<typeof ChatRequest>;
 
-/** Body of GET /eigen/chat/:id/:session. */
-export type ChatHistoryResponse = {
-  messages: UIMessage[];
-  /** Config key of the model that answers (the primary follows /model). */
-  model: string;
-  memory: { scope: "shared" | "isolated"; telegramUserId?: number };
-};
-
-/** Same resource as the user's Telegram chat for the primary and shared agents; a studio thread of its own per agent and session. */
-export function chatMemory(r: Pick<ResolvedAgent, "id" | "primary" | "memory">, root: Pick<Config, "telegram">, session: string) {
-  const user = root.telegram.allowedUserIds[0];
-  const telegram = user === undefined ? "studio" : `telegram:${user}`;
-  const shared = r.primary || r.memory.scope === "shared";
-  return { resource: shared ? telegram : `${r.id}:${telegram}`, thread: `studio:${r.id}:${session}`, scope: shared ? ("shared" as const) : ("isolated" as const), user };
+/** The same resource as the agent's Telegram chat with its first allowed user; a studio thread of its own per session. */
+export function chatMemory(r: Pick<ResolvedAgent, "telegram">, session: string) {
+  return { resource: userResource(r), thread: `studio:${session}`, user: r.telegram.allowedUserIds[0] };
 }
 
 /** Errors go to a browser: no secrets, no filesystem paths, nothing long. */
@@ -104,26 +94,21 @@ const fail = (status: number, error: string) => Response.json({ error }, { statu
 const redactChunks = () => new TransformStream<UIMessageChunk, UIMessageChunk>({ transform: (chunk, c) => c.enqueue(redactDeep(chunk)) });
 
 export type ChatDeps = {
-  paths: HomePaths;
-  root: () => Config;
+  paths: Pick<HomePaths, "agentsDir">;
+  /** Settings of the running version of an agent (the last good one for a stale agent). */
   resolved: (id: string) => ResolvedAgent | undefined;
   detail: (id: string) => GetAgentRuntimeResponse | undefined;
 };
 
-/** The process-wide instance for server.ts. fleet.ts is imported lazily, so tests use makeChat without booting the real registry. */
-export async function studioChat() {
-  const [{ paths, registry }, { getConfig }] = await Promise.all([import("./fleet.ts"), import("./config.ts")]);
-  return makeChat({ paths, root: getConfig, resolved: registry.resolved, detail: (id) => registry.detail(id) });
-}
-
-export function makeChat({ paths, root, resolved, detail }: ChatDeps) {
+export function makeChat({ paths, resolved, detail }: ChatDeps) {
   /** Only a loaded agent (or a stale one, which keeps answering with its last good version) can be chatted with. */
   const target = (id: string) => {
     if (!AgentId.safeParse(id).success) return undefined;
     const status = detail(id)?.runtime.status;
     return status === "loaded" || status === "stale" ? resolved(id) : undefined;
   };
-  const modelOf = (r: ResolvedAgent) => (r.primary ? activeModel(root(), readState(paths), r.modelKey) : r.modelKey);
+  /** The model that answers: the agent's own, or the one picked with /model in chat. */
+  const modelOf = (r: ResolvedAgent) => activeModelKey(r, agentPaths(paths, r.id).stateFile);
   const agentOf = (mastra: Mastra, id: string) => {
     try {
       return mastra.getAgentById(id);
@@ -148,7 +133,7 @@ export function makeChat({ paths, root, resolved, detail }: ChatDeps) {
       const body = ChatRequest.safeParse(json);
       if (!body.success) return fail(400, body.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "));
 
-      const { resource, thread } = chatMemory(r, root(), body.data.session);
+      const { resource, thread } = chatMemory(r, body.data.session);
       const model = modelOf(r);
       try {
         const stream = await handleChatStream({
@@ -157,7 +142,7 @@ export function makeChat({ paths, root, resolved, detail }: ChatDeps) {
           version: "v7",
           params: {
             messages: [body.data.message as UIMessage],
-            memory: { thread: { id: thread, title: `Studio chat with ${r.name}`, metadata: { eigen_source: "studio" } }, resource },
+            ...(r.memory.storage.enabled && { memory: { thread: { id: thread, title: `Studio chat with ${r.name}`, metadata: { eigen_source: "studio" } }, resource } }),
             // Closing the tab (the studio aborts its upstream fetch) stops the model call instead of finishing a reply nobody reads.
             abortSignal: req.signal,
           },
@@ -177,10 +162,10 @@ export function makeChat({ paths, root, resolved, detail }: ChatDeps) {
       const agent = r && agentOf(mastra, id);
       if (!r || !agent) return notFound();
       if (!ChatSession.safeParse(session).success) return fail(400, "bad session id");
-      const { resource, thread, scope, user } = chatMemory(r, root(), session);
+      const { resource, thread, user } = chatMemory(r, session);
       let messages: UIMessage[] = [];
       try {
-        const memory = await agent.getMemory();
+        const memory = r.memory.storage.enabled ? await agent.getMemory() : undefined;
         if (memory && (await memory.getThreadById({ threadId: thread }))) {
           const res = await memory.recall({ threadId: thread, resourceId: resource, perPage: HISTORY_LIMIT });
           messages = redactDeep(toAISdkMessages(res.messages, { version: "v7" }) as UIMessage[]);
@@ -188,7 +173,7 @@ export function makeChat({ paths, root, resolved, detail }: ChatDeps) {
       } catch {
         // A thread from before a Telegram user change belongs to another resource: start fresh rather than fail the panel.
       }
-      const body: ChatHistoryResponse = { messages, model: modelOf(r), memory: { scope, ...(user !== undefined && { telegramUserId: user }) } };
+      const body: ChatHistoryResponse = { messages, model: modelOf(r), memory: { ...(user !== undefined && { telegramUserId: user }) } };
       return Response.json(body, { headers: { "cache-control": "no-store" } });
     },
   };

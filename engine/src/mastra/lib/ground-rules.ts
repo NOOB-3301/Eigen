@@ -1,14 +1,14 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { sortBy } from "lodash-es";
-import type { HomePaths } from "./home.ts";
+import type { AgentPaths } from "./home.ts";
 
 const KEEP = 100;
 
 const read = (file: string) => (existsSync(file) ? readFileSync(file, "utf8") : undefined);
 
 /** The agent edits groundrules.md itself; every changed version is copied where it cannot reach, so a bad edit can be undone. Returns the snapshot path, or undefined when nothing changed. */
-export function snapshotGroundRules(p: HomePaths, now = new Date()) {
+export function snapshotGroundRules(p: Pick<AgentPaths, "groundRulesFile" | "groundRulesHistoryDir">, now = new Date()) {
   const current = read(p.groundRulesFile);
   if (current === undefined) return undefined;
   mkdirSync(p.groundRulesHistoryDir, { recursive: true });

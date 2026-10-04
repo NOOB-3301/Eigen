@@ -16,7 +16,6 @@ const plist = launchdPlist({
   mastraCli,
   repo,
   home: p.home,
-  envFile: p.envFile,
   logsDir: p.logsDir,
   path: uniq([dirname(process.execPath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]).join(":"),
 });

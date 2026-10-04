@@ -1,208 +1,133 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { Agent } from "@mastra/core/agent";
-import { Mastra } from "@mastra/core/mastra";
-import { LibSQLStore } from "@mastra/libsql";
 import { afterEach, describe, expect, it } from "vitest";
-import { scanAgentDir } from "../src/mastra/lib/agents.ts";
-import { parseConfig, toMastraModel, type Config } from "../src/mastra/lib/config.ts";
-import type { HomePaths } from "../src/mastra/lib/home.ts";
-import { liveMemory, makeMemory } from "../src/mastra/lib/memory.ts";
-import { AgentConfigSchema, resolveAgent, type AgentConfigInput } from "../src/mastra/lib/schema.ts";
+import { makeAgentMemory, observationalOptions } from "../src/mastra/lib/memory.ts";
+import { AgentConfigSchema, resolveAgent, type AgentConfigInput, type ResolvedAgent } from "../src/mastra/lib/schema.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 import { fakeLlm } from "./helpers/fake-llm.ts";
-import { DEFAULTS, tmpHome } from "./helpers/home.ts";
 
-const example = JSON.parse(readFileSync(`${DEFAULTS}/config.example.json`, "utf8"));
+const LOCAL = "http://127.0.0.1:9/v1";
+const closers: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  await Promise.all(closers.splice(0).map((c) => c()));
+});
 
-/** The root config with memory overrides, as the studio's root editor would leave it. */
-const rootWith = (llmUrl: string | undefined, memory: Record<string, unknown> = {}, rest: Record<string, unknown> = {}): Config =>
-  parseConfig({
-    ...example,
-    models: { local: { id: "fake/model", url: llmUrl ?? "http://localhost:11434/v1" }, small: { id: "fake/small", url: llmUrl } },
-    defaultModel: "local",
-    curatorModel: undefined,
-    ...rest,
-    memory: { ...example.memory, embedder: { id: "fake/embed", url: llmUrl ?? "http://localhost:11434/v1" }, ...memory },
-  });
+const models = { main: { id: "fake/main", url: LOCAL }, small: { id: "fake/small", url: LOCAL }, cloud: { id: "anthropic/claude-x" } };
+const embedder = { id: "fake/embed", url: LOCAL };
 
-/** The memory an agent with these overrides ends up with (what the factory hands to makeMemory). */
-const effective = (root: Config, memory: AgentConfigInput["memory"]): Config => {
-  const agent = AgentConfigSchema.parse({ id: "a", name: "a", role: "r", description: "d", memory });
-  return { ...root, memory: resolveAgent(agent, root).memory };
+/** What Mastra received for these memory settings: the merged options and the built Memory. */
+function built(memory: AgentConfigInput["memory"], env: Record<string, string> = {}) {
+  const t = tmpAgent({ models, memory: { ...memory, semanticRecall: { embedder, ...memory?.semanticRecall } } });
+  const mem = makeAgentMemory(t.r, t.paths, new Map(Object.entries(env)));
+  if (mem) closers.push(mem.close);
+  return { t, mem, opts: mem?.memory.getMergedThreadConfig({}) };
+}
+
+/** A resolved agent that skips the schema's cross-checks, to show the builder does not rely on them. */
+const raw = (memory: Record<string, unknown>): ResolvedAgent => {
+  const r = resolveAgent(AgentConfigSchema.parse({ id: "a", name: "a", models, model: "main" }), "UTC");
+  return { ...r, memory: { ...r.memory, ...memory } as ResolvedAgent["memory"] };
 };
 
-/** What Mastra actually received: the merged options of the built Memory. */
-const options = (p: HomePaths, cfg: Config) => {
-  const memory = makeMemory(p, cfg);
-  return { memory, opts: memory.getMergedThreadConfig({}) };
-};
-
-describe("memory options built from the switches", () => {
-  it("lastMessages 0 turns the recent history off (Mastra's false); a number is kept", () => {
-    const p = tmpHome();
-    const root = rootWith(undefined);
-    expect(options(p, effective(root, { lastMessages: 0 })).opts.lastMessages).toBe(false);
-    expect(options(p, effective(root, { lastMessages: 7 })).opts.lastMessages).toBe(7);
-    expect(options(p, effective(root, {})).opts.lastMessages).toBe(20); // the root default
+describe("each memory switch reaches Mastra's options", () => {
+  it("storage off: no Memory at all", () => {
+    const off = { enabled: false };
+    expect(built({ storage: off, lastMessages: off, workingMemory: off }).mem).toBeUndefined();
   });
 
-  it("semantic recall off builds no vector store and no embedder; on builds both", () => {
-    const p = tmpHome();
-    const root = rootWith(undefined);
-    const off = options(p, effective(root, { semanticRecall: { enabled: false } }));
-    expect(off.opts.semanticRecall).toBe(false);
-    expect(off.memory.vector).toBeUndefined();
-    expect(off.memory.embedder).toBeUndefined();
-
-    const on = options(p, effective(root, {}));
-    expect(on.opts.semanticRecall).toMatchObject({ topK: 4, messageRange: 2, scope: "resource" });
-    expect(on.memory.vector).toBeDefined();
-    expect(on.memory.embedder).toBeDefined();
+  it("lastMessages: off is Mastra's false; on is the count", () => {
+    expect(built({ lastMessages: { enabled: false } }).opts?.lastMessages).toBe(false);
+    expect(built({ lastMessages: { count: 7 } }).opts?.lastMessages).toBe(7);
+    expect(built({}).opts?.lastMessages).toBe(20);
   });
 
-  it("observational off builds no Observer even when the root turned it on; on builds one", () => {
-    const p = tmpHome();
-    const root = rootWith(undefined, { observational: { enabled: true } });
-    expect(options(p, effective(root, { observational: { enabled: false } })).opts.observationalMemory).toBeFalsy();
-    expect(options(p, effective(root, {})).opts.observationalMemory).toBeTruthy();
-    expect(options(p, effective(rootWith(undefined), { observational: { enabled: true } })).opts.observationalMemory).toBeTruthy();
+  it("working memory: template and scope reach Mastra; off is off", () => {
+    const on = built({ workingMemory: { scope: "thread", template: "# Garden\n- Plants:\n" } }).opts?.workingMemory;
+    expect(on).toMatchObject({ enabled: true, scope: "thread", template: "# Garden\n- Plants:\n" });
+    expect(built({ workingMemory: { enabled: false } }).opts?.workingMemory).toMatchObject({ enabled: false });
   });
 
-  it("an agent that turns semantic recall off still builds when the root enabled knowledge (it needs the vector store)", () => {
-    const p = tmpHome();
-    const root = rootWith(undefined, { observational: { enabled: true }, knowledge: { enabled: true } });
-    const shared = effective(root, { scope: "shared", semanticRecall: { enabled: false } });
-    expect(shared.memory.knowledge.enabled).toBe(true);
-    expect(() => makeMemory(p, shared)).not.toThrow();
-    expect(() => makeMemory(p, effective(root, { scope: "shared" }))).not.toThrow();
+  it("semantic recall off builds no vector store and no embedder; on builds both with its topK, range and scope", () => {
+    const off = built({});
+    expect(off.opts?.semanticRecall).toBe(false);
+    expect(off.mem?.memory.vector).toBeUndefined();
+    expect(off.mem?.memory.embedder).toBeUndefined();
+    const on = built({ semanticRecall: { enabled: true, topK: 3, messageRange: 1, scope: "thread" } });
+    expect(on.opts?.semanticRecall).toMatchObject({ topK: 3, messageRange: 1, scope: "thread" });
+    expect(on.mem?.memory.vector).toBeDefined();
+    expect(on.mem?.memory.embedder).toBeDefined();
   });
 
-  it("each switch is independent of the other two", () => {
-    const p = tmpHome();
-    const root = rootWith(undefined, { observational: { enabled: true } });
-    const { opts } = options(p, effective(root, { lastMessages: 0, semanticRecall: { enabled: false }, observational: { enabled: false } }));
-    expect(opts).toMatchObject({ lastMessages: false, semanticRecall: false });
-    expect(opts.observationalMemory).toBeFalsy();
-    expect(opts.workingMemory).toMatchObject({ enabled: true }); // working memory is not one of the switches
+  it("observational: off builds no Observer; on uses its own model key, else the agent's model", () => {
+    expect(built({}).opts?.observationalMemory).toBeFalsy();
+    const own = observationalOptions(raw({ observational: { ...raw({}).memory.observational, enabled: true, model: "small" } }), new Map());
+    expect(own?.model).toMatchObject({ id: "fake/small" });
+    const dflt = observationalOptions(raw({ observational: { ...raw({}).memory.observational, enabled: true } }), new Map());
+    expect(dflt?.model).toMatchObject({ id: "fake/main" });
+    expect(built({ observational: { enabled: true } }).opts?.observationalMemory).toBeTruthy();
+  });
+
+  it("subconscious only with semantic recall AND observational on", () => {
+    const base = raw({}).memory;
+    const sub = { ...base.subconscious, enabled: true };
+    const obs = { ...base.observational, enabled: true };
+    expect(observationalOptions(raw({ subconscious: sub, observational: obs }), new Map())).not.toHaveProperty("experimental_subconscious");
+    expect(observationalOptions(raw({ subconscious: sub, observational: obs, semanticRecall: { ...base.semanticRecall, enabled: true } }), new Map())).toHaveProperty("experimental_subconscious");
+    expect(observationalOptions(raw({ subconscious: sub, semanticRecall: { ...base.semanticRecall, enabled: true } }), new Map())).toBeUndefined();
+  });
+
+  it("a model key the memory needs must be in the agent's .env, or the memory is not built", () => {
+    expect(() => built({ observational: { enabled: true, model: "cloud" } })).toThrow(/ANTHROPIC_API_KEY is not set/);
+    expect(built({ observational: { enabled: true, model: "cloud" } }, { ANTHROPIC_API_KEY: "sk" }).opts?.observationalMemory).toBeTruthy();
+  });
+
+  it("each switch is independent of the others", () => {
+    const { opts } = built({ lastMessages: { enabled: false }, workingMemory: { enabled: false }, semanticRecall: { enabled: true } });
+    expect(opts).toMatchObject({ lastMessages: false, workingMemory: { enabled: false } });
+    expect(opts?.semanticRecall).toMatchObject({ topK: 4 });
   });
 });
 
-describe("toggling a memory switch reloads the agent", () => {
-  function scan(memory: AgentConfigInput["memory"]) {
-    const p = tmpHome();
-    const dir = join(p.agentsDir, "a");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "instructions.md"), "x");
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ id: "a", name: "a", role: "r", description: "d", memory }));
-    return scanAgentDir(dir, rootWith(undefined)).hash;
-  }
-
-  it("changes the version hash for each switch, and leaves it alone for the same config", () => {
-    const base = scan({});
-    expect(base).toBeDefined();
-    expect(scan({})).toBe(base);
-    const variants = [{ lastMessages: 0 }, { semanticRecall: { enabled: false } }, { observational: { enabled: true } }, { lastMessages: 5 }];
-    const hashes = variants.map((v) => scan(v));
-    expect(hashes).not.toContain(base);
-    expect(new Set(hashes).size).toBe(variants.length);
+describe("close() releases the database", () => {
+  it("closes the store and the vector store; a closed store refuses queries", async () => {
+    const { mem } = built({ semanticRecall: { enabled: true } });
+    const store = (await mem!.memory.storage.getStore("memory"))!;
+    await store.listThreads({ filter: { resourceId: "x" } });
+    await mem!.close();
+    await expect(store.listThreads({ filter: { resourceId: "x" } })).rejects.toThrow();
+    await mem!.close(); // twice is fine
   });
 });
 
-describe("what the model actually sees (real agent, fake model and embeddings)", () => {
-  const closers: Array<() => Promise<void>> = [];
-  afterEach(async () => {
-    await Promise.all(closers.splice(0).map((c) => c()));
-  });
-
-  /** An agent whose memory follows `override` (an agent's own memory settings over the root's). */
-  async function setup(override: AgentConfigInput["memory"]) {
-    const p = tmpHome();
+describe("what the model actually sees (real agent, fake model)", () => {
+  async function setup(memory: AgentConfigInput["memory"]) {
     const llm = await fakeLlm([{ text: "noted" }]);
     closers.push(llm.close);
-    const root = rootWith(llm.url);
-    let current = effective(root, override);
-    const agent = new Agent({ id: "t", name: "t", instructions: "test", model: toMastraModel(root.models.local!), memory: liveMemory(p, () => current) });
-    const mastra = new Mastra({ agents: { t: agent }, storage: new LibSQLStore({ id: "t", url: `file:${join(p.dataDir, "t.db")}` }) });
+    const t = tmpAgent({ models: { main: { id: "fake/model", url: llm.url } }, memory });
+    const mem = makeAgentMemory(t.r, t.paths, new Map())!;
+    closers.push(mem.close);
+    const agent = new Agent({ id: "t", name: "t", instructions: "test", model: { id: "fake/model", url: llm.url }, memory: mem.memory });
     return {
-      llm,
-      say: (text: string) => mastra.getAgent("t").generate(text, { memory: { thread: "t1", resource: "user-1" } }),
-      /** Did the last request to the model contain this text (anywhere: history, recall, working memory)? */
+      say: (text: string) => agent.generate(text, { memory: { thread: "t1", resource: "user-1" } }),
       saw: (text: string) => JSON.stringify(llm.requests.at(-1)).includes(text),
-      retune: (next: AgentConfigInput["memory"]) => void (current = effective(root, next)),
+      llm,
     };
   }
 
-  it("lastMessages 0: the next turn does not carry the earlier one; with history on it does", async () => {
-    const on = await setup({ semanticRecall: { enabled: false } });
+  it("lastMessages off: the next turn does not carry the earlier one; on: it does", async () => {
+    const on = await setup({});
     await on.say("my favourite fruit is mango pudding");
     await on.say("what did I just say");
     expect(on.saw("mango pudding")).toBe(true);
 
-    const off = await setup({ lastMessages: 0, semanticRecall: { enabled: false } });
+    const off = await setup({ lastMessages: { enabled: false } });
     await off.say("my favourite fruit is mango pudding");
     await off.say("what did I just say");
     expect(off.saw("mango pudding")).toBe(false);
   });
 
-  it("flipping lastMessages on a running agent takes effect on its next message, with no rebuild of the agent", async () => {
-    const t = await setup({ lastMessages: 0, semanticRecall: { enabled: false } });
-    await t.say("my favourite fruit is mango pudding");
-    await t.say("what did I just say");
-    expect(t.saw("mango pudding")).toBe(false);
-
-    t.retune({ semanticRecall: { enabled: false } });
-    await t.say("my favourite colour is teal");
-    await t.say("what did I just say");
-    expect(t.saw("teal")).toBe(true);
-
-    t.retune({ lastMessages: 0, semanticRecall: { enabled: false } });
-    await t.say("and now?");
-    expect(t.saw("teal")).toBe(false);
-  });
-
-  it("with history off Mastra stores no messages, so semantic recall has nothing to find (the studio should say so)", async () => {
-    const recall = { topK: 1, messageRange: 1 };
-    const on = await setup({ lastMessages: 1, semanticRecall: recall });
-    const off = await setup({ lastMessages: 0, semanticRecall: recall });
-    for (const t of [on, off]) {
-      await t.say("my favourite fruit is mango pudding");
-      await t.say("it rained a lot today");
-      await t.say("then we talked about cars");
-      await t.say("what pudding fruit do i like");
-    }
-    expect(on.saw("mango pudding")).toBe(true); // recalled from outside the one-message window
-    expect(off.saw("mango pudding")).toBe(false);
-  });
-
-  it("semantic recall off: nothing is embedded; on: the messages are", async () => {
-    // Mastra caches embeddings by text for the whole process, so this test uses wording no other test does.
-    const off = await setup({ lastMessages: 1, semanticRecall: { enabled: false } });
-    await off.say("a zebra casserole is my favourite");
-    await off.say("hello again");
-    expect(off.llm.embeddings).toEqual([]);
-
-    const on = await setup({ lastMessages: 1, semanticRecall: { topK: 1, messageRange: 1 } });
-    await on.say("a zebra casserole is my favourite");
-    await on.say("hello again");
-    expect(on.llm.embeddings.join("\n")).toContain("zebra casserole");
-  });
-});
-
-describe("liveMemory", () => {
-  it("returns the same Memory until a memory setting changes, then builds a new one", () => {
-    const p = tmpHome();
-    let root = rootWith(undefined);
-    const get = liveMemory(p, () => root);
-    const first = get();
-    expect(get()).toBe(first);
-    root = { ...root, defaultModel: "small" }; // not a memory setting
-    expect(get()).toBe(first);
-    root = effective(root, { lastMessages: 0 });
-    const second = get();
-    expect(second).not.toBe(first);
-    expect(second.getMergedThreadConfig({}).lastMessages).toBe(false);
-    expect(get()).toBe(second);
-    root = effective(root, { lastMessages: 5 });
-    expect(get().getMergedThreadConfig({}).lastMessages).toBe(5);
+  it("working memory off: the model gets no working-memory tool", async () => {
+    const off = await setup({ workingMemory: { enabled: false } });
+    await off.say("hi");
+    expect((off.llm.requests[0]!.tools ?? []).map((t) => t.function.name)).not.toContain("updateWorkingMemory");
   });
 });

@@ -4,7 +4,7 @@ import type { GithubCheckResponse, ListTriggerRunsResponse, RunTriggerResponse, 
 import { fetcher } from "@/lib/client/api";
 
 /*
- * Client side of trigger run history and probes (routes under /api/agents/[id]/triggers and /api/github/check).
+ * Client side of trigger run history and probes (routes under /api/agents/[id]/triggers and /api/agents/[id]/github/check).
  * The run log lives in the engine, so with the engine offline the list is empty and the probes answer { ok:false, error }.
  */
 
@@ -46,5 +46,6 @@ export async function runTriggerNow(agentId: string, triggerId: string): Promise
   return r;
 }
 
-/** Can the token in `tokenEnv` read the pull requests of `repo`? The token never reaches the browser. */
-export const checkGithub = (tokenEnv: string, repo: string): Promise<GithubCheckResponse> => post<GithubCheckResponse>("/api/github/check", { tokenEnv, repo });
+/** Can the token in `tokenEnv` (in this agent's .env) read the pull requests of `repo`? The token never reaches the browser. */
+export const checkGithub = (agentId: string, tokenEnv: string, repo: string): Promise<GithubCheckResponse> =>
+  post<GithubCheckResponse>(`/api/agents/${encodeURIComponent(agentId)}/github/check`, { tokenEnv, repo });

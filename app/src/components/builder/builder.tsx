@@ -1,17 +1,15 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Crown, MessageSquare, Plug, Plus, Trash2, X } from "lucide-react";
-import type { SkillSummary, TriggerInput } from "@eigen/engine/schema";
-import type { FleetResponse, RootInfo } from "@/lib/types";
+import { MessageSquare, Plug, Plus, Trash2, X } from "lucide-react";
+import { MEMORY_BLOCKS, type TriggerInput } from "@eigen/engine/schema";
+import type { FleetResponse } from "@/lib/types";
 import { useSkills } from "@/lib/client/library";
 import { cn } from "@/lib/cn";
 import { Button, Modal, Monogram, Skeleton, StatusBadge, StatusDot, spring } from "@/components/ui";
-import type { SettingsSection } from "@/components/settings/settings-dialog";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { newTrigger } from "@/components/editors/trigger-form";
-import { PrimaryDialog, TrashDialog } from "@/components/inspector/agent-dialogs";
-import { useAgentDraft } from "@/components/inspector/use-agent-draft";
+import { TrashDialog } from "./agent-dialogs";
 import { ApplyBar } from "./apply-bar";
 import { BuilderCanvas, type BuilderCanvasApi } from "./canvas";
 import { BuilderProvider, type BuilderApi } from "./context";
@@ -19,24 +17,23 @@ import { BLURB, kindIcon } from "./kinds";
 import { layoutBuilder, type Adder } from "./layout";
 import { liveOf } from "./live";
 import {
-  GROUPS,
-  addPrivateServer,
+  AGENT_NODE,
+  addMcpServer,
   addTrigger,
   connect as connectRef,
   deriveItems,
   describeChanges,
   disconnect as disconnectRef,
+  disconnectWarning,
   freeTriggerId,
-  isDestructive,
   issuesByNode,
   needsSetup,
   parseRef,
+  problemsByNode,
   readAgent,
+  removeMcpServer,
   removeTrigger,
-  renamePrivateServer,
-  setSoulSource,
-  updatePrivateServer,
-  updateTrigger,
+  renameMcpServer,
   type Ctx,
   type Item,
   type Ref,
@@ -44,11 +41,11 @@ import {
 } from "./model";
 import { NodePanel, type PanelCtx } from "./node-panel";
 import { AddPalette, type PaletteEntry, type PaletteSection } from "./palette";
+import { useAgentDraft } from "./use-agent-draft";
 
 type Props = {
   agentId: string;
   fleet: FleetResponse;
-  root?: RootInfo;
   engineOnline: boolean;
   phone: boolean;
   wide: boolean;
@@ -56,14 +53,39 @@ type Props = {
   onDirtyChange: (staged: number) => void;
   /** The agent is gone (trashed): go back to the fleet. */
   onGone: () => void;
-  onOpenSettings: (section: SettingsSection) => void;
 };
 
 type Confirm = { title: string; body: string; label: string; run: () => void };
 
-export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDirtyChange, onGone, onOpenSettings }: Props) {
-  const d = useAgentDraft({ id: agentId, root, engineOnline, quiet: true });
-  const { skills, isLoading: skillsLoading } = useSkills();
+/** The palette section an unconnected component is offered in (null: not offered there). */
+function sectionOf(i: Item): PaletteSection | null {
+  switch (i.ref.kind) {
+    case "storage":
+    case "lastMessages":
+    case "workingMemory":
+    case "semanticRecall":
+    case "observational":
+    case "subconscious":
+      return "memory";
+    case "soul":
+      return "think";
+    case "workspace":
+    case "schedule":
+      return "builtin";
+    case "mcp":
+      return "mcp";
+    case "skill":
+      return "skills";
+    case "telegram":
+      return "reach";
+    default:
+      return null;
+  }
+}
+
+export function Builder({ agentId, fleet, engineOnline, phone, wide, onDirtyChange, onGone }: Props) {
+  const d = useAgentDraft({ id: agentId, engineOnline, quiet: true });
+  const { skills, isLoading: skillsLoading } = useSkills(agentId);
   const reduce = useReducedMotion();
   const canvas = useRef<BuilderCanvasApi>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -72,20 +94,25 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
   const [chat, setChat] = useState(false);
   const [review, setReview] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  const [dialog, setDialog] = useState<null | "primary" | "trash">(null);
+  const [trash, setTrash] = useState(false);
 
   const { draft, base } = d;
-  const mctx = useMemo<Ctx>(() => ({ agentId, root, skills: skills as Array<Pick<SkillSummary, "slug" | "name" | "description" | "problem">>, skillsKnown: !skillsLoading }), [agentId, root, skills, skillsLoading]);
+  const mctx = useMemo<Ctx>(() => ({ agentId, skills, skillsKnown: !skillsLoading }), [agentId, skills, skillsLoading]);
   const items = useMemo(() => (draft ? deriveItems(draft, mctx) : []), [draft, mctx]);
-  const layout = useMemo(() => (items.length ? layoutBuilder(items, { think: GROUPS.think.title, tools: GROUPS.tools.title, reach: GROUPS.reach.title }, phone ? "stack" : "wide") : { nodes: [], edges: [] }), [items, phone]);
+  const layout = useMemo(() => (items.length ? layoutBuilder(items, phone ? "stack" : "wide") : { nodes: [], edges: [] }), [items, phone]);
   const changes = useMemo(() => (base && draft ? describeChanges(base, draft, mctx) : []), [base, draft, mctx]);
-  const nodeIssues = useMemo(() => (draft ? issuesByNode(d.errors, draft.config) : {}), [d.errors, draft]);
-  const read = draft ? readAgent(draft.config, root) : null;
-  const primary = read?.primary ?? false;
-  const name = (typeof draft?.config.name === "string" && draft.config.name) || fleet.agents.find((a) => a.id === agentId)?.name || agentId;
   const summary = fleet.agents.find((a) => a.id === agentId);
   const runtime = d.data?.runtime ?? summary?.runtime;
-  const live = useMemo(() => liveOf(agentId, runtime, d.data?.resolved, fleet, engineOnline), [agentId, runtime, d.data?.resolved, fleet, engineOnline]);
+  const live = useMemo(() => liveOf(runtime, d.data?.resolved, engineOnline), [runtime, d.data?.resolved, engineOnline]);
+  // Validation issues where they belong, plus the engine's problems on the node they name. The agent node counts the engine's itself.
+  const nodeIssues = useMemo(() => {
+    if (!draft) return {};
+    const out = issuesByNode(d.errors, draft.config);
+    for (const [node, list] of Object.entries(problemsByNode(live.problems, draft.config))) if (node !== AGENT_NODE) out[node] = [...(out[node] ?? []), ...list.filter((p) => !out[node]?.includes(p))];
+    return out;
+  }, [d.errors, draft, live.problems]);
+  const read = draft ? readAgent(draft.config) : null;
+  const name = (typeof draft?.config.name === "string" && draft.config.name) || summary?.name || agentId;
   const panelWidth = phone ? 0 : wide ? 480 : 420;
 
   // The studio asks before leaving with staged changes.
@@ -95,13 +122,10 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
   }, [staged, onDirtyChange]);
   useEffect(() => () => onDirtyChange(0), [onDirtyChange]);
 
-  const open = useCallback(
-    (nodeId: string) => {
-      setSelected(nodeId);
-      setChat(false);
-    },
-    [],
-  );
+  const open = useCallback((nodeId: string) => {
+    setSelected(nodeId);
+    setChat(false);
+  }, []);
   // A side sheet covers the right of the canvas: slide the view so the composition sits in what is left, and back when it closes.
   const sheetOpen = !phone && !!draft && ((selected !== null && !chat) || chat);
   const sheetWidth = !sheetOpen ? 0 : chat ? (wide ? 520 : 440) : panelWidth;
@@ -118,7 +142,7 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
     if (id) setTimeout(() => document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus(), 60);
   }, [selected]);
 
-  const selectedValid = selected !== null && (selected === "agent" || selected === "library" || layout.nodes.some((n) => n.id === selected));
+  const selectedValid = selected !== null && (selected === AGENT_NODE || selected === "library" || layout.nodes.some((n) => n.id === selected) || items.some((i) => i.id === selected));
   // The node under the open panel is gone (a trigger was deleted): close the panel instead of leaving it dangling.
   if (selected !== null && !selectedValid && draft) setSelected(null);
 
@@ -132,20 +156,25 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
     [d, mctx, open],
   );
 
-  const doDisconnect = useCallback((ref: Ref) => d.update((cur) => disconnectRef(cur, ref, mctx, base ?? undefined)), [d, mctx, base]);
-
   const disconnect = useCallback(
     (ref: Ref) => {
-      if (!isDestructive(ref)) return doDisconnect(ref);
-      const nm = ref.kind === "private-mcp" ? ref.name : "";
-      setConfirm({
-        title: `Remove the MCP server ${nm}?`,
-        body: `This deletes its command, arguments and settings from ${name}'s config. Nothing is written until you apply, and Discard brings it back.`,
-        label: "Remove server",
-        run: () => doDisconnect(ref),
-      });
+      const run = () => d.update((cur) => disconnectRef(cur, ref, mctx, base ?? undefined));
+      const warning = draft ? disconnectWarning(draft, ref) : null;
+      if (!warning) return run();
+      setConfirm({ title: `Disconnect the storage of ${name}?`, body: `${warning} Nothing is written until you apply, and Discard brings it back.`, label: "Disconnect storage", run });
     },
-    [doDisconnect, name],
+    [d, mctx, base, draft, name],
+  );
+
+  const removeMcp = useCallback(
+    (server: string) =>
+      setConfirm({
+        title: `Delete the MCP server ${server}?`,
+        body: `This removes its command, arguments and settings from ${name}'s config. To keep it but stop using it, switch it off instead. Nothing is written until you apply.`,
+        label: "Delete server",
+        run: () => d.update((cur) => removeMcpServer(cur, server)),
+      }),
+    [d, name],
   );
 
   const deleteTrigger = useCallback(
@@ -159,12 +188,12 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
     [d, name],
   );
 
-  const addPrivate = useCallback(() => {
+  const addMcp = useCallback(() => {
     if (!draft) return;
-    const { draft: next, ref } = addPrivateServer(draft, mctx);
+    const { draft: next, ref } = addMcpServer(draft);
     d.update(() => next);
     open(refId(ref));
-  }, [d, draft, mctx, open]);
+  }, [d, draft, open]);
 
   const addNewTrigger = useCallback(
     (type: TriggerInput["type"]) => {
@@ -178,19 +207,14 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
 
   const adder = useCallback(
     (kind: Adder) => {
-      if (kind === "private-mcp") addPrivate();
-      else setPalette({ open: true, section: kind === "trigger" ? "reach" : kind === "mcp-more" ? "mcp" : "skills" });
+      if (kind === "mcp") addMcp();
+      else if (kind === "skills") open("library");
+      else setPalette({ open: true, section: "reach" });
     },
-    [addPrivate],
+    [addMcp, open],
   );
 
-  const onActivate = useCallback(
-    (id: string) => {
-      if (id.startsWith("adder:")) return adder(id.slice("adder:".length) as Adder);
-      open(id);
-    },
-    [adder, open],
-  );
+  const onActivate = useCallback((id: string) => (id.startsWith("adder:") ? adder(id.slice("adder:".length) as Adder) : open(id)), [adder, open]);
 
   const connectGhost = useCallback(
     (id: string) => {
@@ -233,6 +257,9 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
 
   /* ---- what the canvas and the panels are given ---- */
 
+  const modelKey = read?.modelKey ?? "";
+  const modelId = typeof read?.models[modelKey]?.id === "string" ? (read.models[modelKey].id as string) : "";
+  const memoryOn = read ? MEMORY_BLOCKS.filter((b) => read.blocks[b]).length : 0;
   const api = useMemo<BuilderApi>(
     () => ({
       live,
@@ -250,75 +277,51 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
         name,
         role: (typeof draft?.config.role === "string" && draft.config.role) || "",
         description: (typeof draft?.config.description === "string" && draft.config.description) || "",
-        primary,
         enabled: draft?.config.enabled !== false,
-        modelKey: read?.modelKey ?? "",
-        memoryScope: ((draft?.config.memory as { scope?: string } | undefined)?.scope as string | undefined) ?? "isolated",
-        // The primary is never built by the agent factory, so it always runs in the shared sandbox whatever its file says.
-        sandbox: primary ? "shared" : (((draft?.config.sandbox as { mode?: string } | undefined)?.mode as string | undefined) ?? "shared"),
+        modelKey,
+        modelId,
+        memory: read?.storage ? memoryOn : 0,
       },
       itemsById: new Map(items.map((i) => [i.id, i])),
     }),
-    [live, changes, nodeIssues, selected, hovered, open, connect, disconnect, adder, agentId, name, draft, primary, read?.modelKey, items],
+    [live, changes, nodeIssues, selected, hovered, open, connect, disconnect, adder, agentId, name, draft, modelKey, modelId, read?.storage, memoryOn, items],
   );
 
   const panelCtx: PanelCtx | null = draft
     ? {
         agentId,
         agentName: name,
-        root,
-        agents: fleet.agents,
         draft,
+        base,
         errors: d.errors,
         hasInstructionsFile: d.data?.instructionsText !== null,
         runtime,
-        resolved: d.data?.resolved,
         live,
         engineOnline,
         items,
         issues: nodeIssues,
         set: d.set,
+        update: d.update,
         setInstructions: d.setInstructions,
         setSoul: d.setSoul,
-        setSoulSource: (source) => d.update((cur) => (source === "none" ? disconnectRef(cur, { kind: "soul" }, mctx, base ?? undefined) : setSoulSource(cur, source, name))),
-        updateTrigger: (id, next) => d.update((cur) => updateTrigger(cur, id, next)),
-        updatePrivateServer: (n, next) => d.update((cur) => updatePrivateServer(cur, n, next, mctx)),
-        renamePrivateServer: (from, to) => {
-          d.update((cur) => renamePrivateServer(cur, from, to, mctx));
-          setSelected(`private-mcp:${to}`);
-        },
         connect,
         disconnect,
         removeTrigger: deleteTrigger,
+        removeMcp,
+        renameMcp: (from, to) => {
+          if (!draft || renameMcpServer(draft, from, to) === draft) return;
+          d.update((cur) => renameMcpServer(cur, from, to));
+          setSelected(`mcp:${to}`);
+        },
         open,
-        openSettings: onOpenSettings,
+        trash: () => setTrash(true),
       }
     : null;
 
   const entries = useMemo<PaletteEntry[]>(() => {
     const out: PaletteEntry[] = [];
-    const section = (i: Item): PaletteSection | null => {
-      switch (i.ref.kind) {
-        case "soul":
-        case "recent":
-        case "semantic":
-        case "observational":
-          return "think";
-        case "workspace":
-        case "schedule":
-          return "builtin";
-        case "mcp":
-          return "mcp";
-        case "skill":
-          return "skills";
-        case "telegram":
-          return primary ? null : "reach";
-        default:
-          return null;
-      }
-    };
     for (const i of items) {
-      const s = !i.connected && !i.unavailable ? section(i) : null;
+      const s = i.connected ? null : sectionOf(i);
       if (!s) continue;
       out.push({
         key: i.id,
@@ -326,17 +329,17 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
         type: i.type,
         icon: kindIcon(i.ref.kind),
         title: i.title,
-        detail: i.ref.kind === "skill" ? i.detail || "A skill from the library" : (BLURB[i.ref.kind] ?? i.detail ?? ""),
+        detail: i.ref.kind === "skill" ? i.detail || "A skill from this agent's library" : i.ref.kind === "mcp" ? `Switched off · ${i.detail ?? ""}` : (BLURB[i.ref.kind] ?? i.detail ?? ""),
         blocked: i.blocked,
         run: () => connect(i.ref),
       });
     }
-    out.push({ key: "new-mcp", section: "mcp", type: "MCP server", icon: Plug, title: "New MCP server", detail: "A tool server only this agent uses", run: addPrivate });
-    out.push({ key: "library", section: "skills", type: "Skill", icon: kindIcon("skill"), title: "Skill library", detail: "Browse, write and edit skills", action: true, run: () => open("library") });
+    out.push({ key: "new-mcp", section: "mcp", type: "MCP server", icon: Plug, title: "New MCP server", detail: "A tool server for this agent: a local command or a remote URL", run: addMcp });
+    out.push({ key: "library", section: "skills", type: "Skill", icon: kindIcon("skill"), title: "Skill library", detail: "Browse, write and edit this agent's skills", action: true, run: () => open("library") });
     out.push({ key: "trigger-cron", section: "reach", type: "Trigger", icon: kindIcon("trigger", "cron"), title: "Schedule trigger", detail: "Wake it on a cron schedule", run: () => addNewTrigger("cron") });
     out.push({ key: "trigger-github", section: "reach", type: "Trigger", icon: kindIcon("trigger", "github-pr"), title: "GitHub pull request trigger", detail: "Wake it when a pull request opens or updates", run: () => addNewTrigger("github-pr") });
     return out;
-  }, [items, primary, connect, addPrivate, addNewTrigger, open]);
+  }, [items, connect, addMcp, addNewTrigger, open]);
 
   /* ---- render ---- */
 
@@ -347,7 +350,7 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
           <h2 className="text-[16px] font-semibold text-ink">This agent no longer exists</h2>
           <p className="mt-1.5 text-[13px] text-ink-2">It may have been moved to the trash.</p>
           <Button variant="primary" className="mt-4" onClick={onGone}>
-            Back to the team
+            Back to the agents
           </Button>
         </div>
       </div>
@@ -383,7 +386,6 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
         <div className="pointer-events-auto flex h-11 min-w-0 items-center gap-2.5 rounded-xl border border-line bg-panel/90 pr-3 pl-2 shadow-float backdrop-blur-md">
           <Monogram id={agentId} name={name} size={30} />
           <h2 className="max-w-[16ch] truncate text-[14.5px] font-semibold tracking-[-0.01em] text-ink sm:max-w-[24ch]">{name}</h2>
-          {primary && <Crown size={14} className="shrink-0 text-crown" aria-label="primary" />}
           <span className="hidden font-mono text-[12px] text-ink-3 sm:inline">@{agentId}</span>
           {runtime && (
             <>
@@ -404,13 +406,8 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
           <Button variant="quiet" className="h-8" onClick={() => (setSelected(null), setChat((c) => !c))} aria-pressed={chat} disabled={!draft}>
             <MessageSquare size={14} /> <span className="hidden sm:inline">Chat</span>
           </Button>
-          {draft && !primary && (
-            <Button variant="quiet" className="h-8 px-2" onClick={() => setDialog("primary")} title="Make this agent the primary">
-              <Crown size={14} /> <span className="hidden md:inline">Make primary</span>
-            </Button>
-          )}
           {draft && (
-            <Button variant="quiet" className="h-8 px-2 hover:text-bad" onClick={() => setDialog("trash")} disabled={primary} aria-label="Move to trash" title={primary ? "The primary cannot be removed. Make another agent primary first." : "Move to trash"}>
+            <Button variant="quiet" className="h-8 px-2 hover:text-bad" onClick={() => setTrash(true)} aria-label="Move to trash" title="Move to trash">
               <Trash2 size={14} />
             </Button>
           )}
@@ -519,8 +516,7 @@ export function Builder({ agentId, fleet, root, engineOnline, phone, wide, onDir
           </div>
         </div>
       </Modal>
-      <PrimaryDialog open={dialog === "primary"} onClose={() => setDialog(null)} id={agentId} name={name} fleet={fleet} dirty={d.dirty} onDone={() => void d.refetch()} />
-      <TrashDialog open={dialog === "trash"} onClose={() => setDialog(null)} id={agentId} name={name} onDone={onGone} />
+      <TrashDialog open={trash} onClose={() => setTrash(false)} id={agentId} name={name} onDone={onGone} />
     </BuilderProvider>
   );
 }

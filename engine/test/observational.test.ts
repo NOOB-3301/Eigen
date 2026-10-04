@@ -1,83 +1,77 @@
-import { readFileSync } from "node:fs";
 import type { MastraDBMessage } from "@mastra/core/agent";
 import { describe, expect, it } from "vitest";
-import { parseConfig, type Config } from "../src/mastra/lib/config.ts";
 import { buildInstructions } from "../src/mastra/lib/instructions.ts";
-import { clipStrings, dropScheduledTurns, makeMemory, observationalOptions, observerHooks } from "../src/mastra/lib/memory.ts";
+import { clipStrings, dropScheduledTurns, makeAgentMemory, observationalOptions, observerHooks } from "../src/mastra/lib/memory.ts";
+import { AgentConfigSchema, resolveAgent, type AgentConfigInput } from "../src/mastra/lib/schema.ts";
 import { hasSecret, redact, redactDeep } from "../src/mastra/lib/secrets.ts";
-import { DEFAULTS, tmpHome } from "./helpers/home.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
-const example = JSON.parse(readFileSync(`${DEFAULTS}/config.example.json`, "utf8"));
-const cfgWith = (memory: Record<string, unknown> = {}, rest: Record<string, unknown> = {}): Config =>
-  parseConfig({
-    ...example,
-    models: { local: { id: "ollama/x", url: "http://localhost:11434/v1" }, cloud: { id: "anthropic/claude-sonnet-5-5" }, small: { id: "ollama-cloud/gpt-oss:20b" } },
-    defaultModel: "local",
-    curatorModel: "cloud",
-    ...rest,
-    memory: { ...example.memory, ...memory },
-  });
+const LOCAL = "http://localhost:11434/v1";
+const KEYS = new Map([["ANTHROPIC_API_KEY", "sk-ant"], ["OLLAMA_API_KEY", "ol"]]);
+const agent = (memory: AgentConfigInput["memory"] = {}) =>
+  resolveAgent(
+    AgentConfigSchema.parse({
+      id: "a",
+      name: "a",
+      models: { local: { id: "ollama/x", url: LOCAL }, cloud: { id: "anthropic/claude-sonnet-5-5" }, small: { id: "ollama-cloud/gpt-oss:20b" } },
+      model: "local",
+      memory: { ...memory, semanticRecall: { embedder: { id: "ollama/nomic-embed-text", url: LOCAL }, ...memory.semanticRecall } },
+    }),
+    "UTC",
+  );
 
 const msg = (role: string, text: string, type?: string): MastraDBMessage =>
   ({ id: `${role}-${text}`, role, type, createdAt: new Date(), content: { format: 2, parts: [{ type: "text", text }] } }) as unknown as MastraDBMessage;
 const texts = (ms: MastraDBMessage[]) => ms.map((m) => (m.content.parts[0] as { text: string }).text);
 
 describe("memory config", () => {
-  it("leaves observational memory and knowledge off by default", () => {
-    const c = parseConfig({ ...example, memory: undefined });
-    expect(c.memory.observational).toMatchObject({ enabled: false, messageTokens: 8000, reflectionTokens: 20000, retrieval: true });
-    expect(c.memory.knowledge).toMatchObject({ enabled: false, pins: true, maxPins: 20, maxCharacters: 2000 });
-    expect(observationalOptions(() => c)).toBeUndefined();
+  it("leaves observational memory and the subconscious off by default", () => {
+    const r = agent();
+    expect(r.memory.observational).toMatchObject({ enabled: false, messageTokens: 8000, reflectionTokens: 20000, retrieval: true });
+    expect(r.memory.subconscious).toMatchObject({ enabled: false, pins: true, maxPins: 20, maxCharacters: 2000 });
+    expect(observationalOptions(r, KEYS)).toBeUndefined();
   });
 
-  it("rejects an unknown observer model and knowledge without observational", () => {
-    expect(() => cfgWith({ observational: { enabled: true, model: "nope" } })).toThrow(/must name an entry in models/);
-    expect(() => cfgWith({ knowledge: { enabled: true } })).toThrow(/needs memory.observational.enabled/);
+  it("rejects an unknown observer model, and a subconscious without semantic recall and observational", () => {
+    expect(() => agent({ observational: { enabled: true, model: "nope" } })).toThrow(/must name an entry in models/);
+    expect(() => agent({ subconscious: { enabled: true }, observational: { enabled: true } })).toThrow(/subconscious needs semantic recall and observational/);
   });
 });
 
 describe("observationalOptions", () => {
   it("uses thread scope, the configured thresholds and the recall tool with semantic search", () => {
-    const o = observationalOptions(() => cfgWith({ observational: { enabled: true, messageTokens: 3000, reflectionTokens: 9000, activateAfterIdle: "10m" } }))!;
+    const o = observationalOptions(agent({ semanticRecall: { enabled: true }, observational: { enabled: true, messageTokens: 3000, reflectionTokens: 9000, activateAfterIdle: "10m" } }), KEYS)!;
     expect(o).toMatchObject({ scope: "thread", observation: { messageTokens: 3000, failurePolicy: "continue" }, reflection: { observationTokens: 9000, failurePolicy: "continue" }, activateAfterIdle: "10m", retrieval: { vector: true } });
     expect(o).not.toHaveProperty("experimental_subconscious");
   });
 
   it("browses only when semantic recall is off, and drops retrieval when asked", () => {
-    expect(observationalOptions(() => cfgWith({ semanticRecall: { enabled: false }, observational: { enabled: true } }))!.retrieval).toBe(true);
-    expect(observationalOptions(() => cfgWith({ observational: { enabled: true, retrieval: false } }))!.retrieval).toBe(false);
+    expect(observationalOptions(agent({ observational: { enabled: true } }), KEYS)!.retrieval).toBe(true);
+    expect(observationalOptions(agent({ observational: { enabled: true, retrieval: false } }), KEYS)!.retrieval).toBe(false);
   });
 
-  it("picks the observer model from observational.model, then curatorModel, then defaultModel, and follows /reload", () => {
-    const pick = (memory: Record<string, unknown>, rest: Record<string, unknown> = {}) => (observationalOptions(() => cfgWith(memory, rest))!.model as () => unknown)();
-    expect(pick({ observational: { enabled: true, model: "small" } })).toBe("ollama-cloud/gpt-oss:20b");
-    expect(pick({ observational: { enabled: true } })).toBe("anthropic/claude-sonnet-5-5");
-    expect(pick({ observational: { enabled: true } }, { curatorModel: undefined })).toMatchObject({ id: "ollama/x" });
-
-    let live = cfgWith({ observational: { enabled: true, model: "small" } });
-    const o = observationalOptions(() => live)!;
-    live = cfgWith({ observational: { enabled: true, model: "cloud" } });
-    expect((o.model as () => unknown)()).toBe("anthropic/claude-sonnet-5-5");
+  it("picks the observer model from observational.model, else the agent's model, with the key from the agent's .env", () => {
+    expect(observationalOptions(agent({ observational: { enabled: true, model: "small" } }), KEYS)!.model).toEqual({ id: "ollama-cloud/gpt-oss:20b", apiKey: "ol" });
+    expect(observationalOptions(agent({ observational: { enabled: true } }), KEYS)!.model).toEqual({ id: "ollama/x", url: LOCAL });
   });
 
-  it("lets the knowledge agents use their own model", () => {
-    const o = observationalOptions(() => cfgWith({ observational: { enabled: true, model: "small" }, knowledge: { enabled: true, model: "cloud" } }))!;
-    const sub = (o as { experimental_subconscious?: { resolved: { observation: Array<{ model?: unknown }> } } }).experimental_subconscious!;
-    expect((sub.resolved.observation[0]!.model as () => unknown)()).toBe("anthropic/claude-sonnet-5-5");
-    expect((o.model as () => unknown)()).toBe("ollama-cloud/gpt-oss:20b");
+  it("lets the subconscious use its own model, else the observer's", () => {
+    const both = { semanticRecall: { enabled: true }, observational: { enabled: true, model: "small" } } as const;
+    type Sub = { experimental_subconscious?: { resolved: { observation: Array<{ model?: unknown; name: string }>; pins: unknown } } };
+    const own = (observationalOptions(agent({ ...both, subconscious: { enabled: true, model: "cloud" } }), KEYS) as Sub).experimental_subconscious!;
+    expect(own.resolved.observation[0]!.model).toEqual({ id: "anthropic/claude-sonnet-5-5", apiKey: "sk-ant" });
+    const inherited = (observationalOptions(agent({ ...both, subconscious: { enabled: true, maxPins: 5, maxCharacters: 900 } }), KEYS) as Sub).experimental_subconscious!;
+    expect(inherited.resolved.observation[0]!.model).toEqual({ id: "ollama-cloud/gpt-oss:20b", apiKey: "ol" });
+    expect(inherited.resolved.observation.map((a) => a.name).sort()).toEqual(["curate", "remind"]);
+    expect(inherited.resolved.pins).toEqual({ maxPins: 5, maxCharacters: 900 });
   });
 
-  it("adds the Subconscious only when knowledge is enabled", () => {
-    const o = observationalOptions(() => cfgWith({ observational: { enabled: true }, knowledge: { enabled: true, maxPins: 5, maxCharacters: 900 } }))!;
-    const sub = (o as { experimental_subconscious?: { resolved: { observation: Array<{ name: string }>; pins: unknown; tools: boolean } } }).experimental_subconscious!;
-    expect(sub.resolved.observation.map((a) => a.name).sort()).toEqual(["curate", "remind"]);
-    expect(sub.resolved.pins).toEqual({ maxPins: 5, maxCharacters: 900 });
-  });
-
-  it("builds a real Memory with everything enabled", () => {
-    const p = tmpHome();
-    const c = cfgWith({ observational: { enabled: true }, knowledge: { enabled: true }, embedder: { id: "ollama/nomic-embed-text", url: "http://localhost:11434/v1" } });
-    expect(() => makeMemory(p, c)).not.toThrow();
+  it("builds a real Memory with everything enabled", async () => {
+    const t = tmpAgent();
+    const r = agent({ semanticRecall: { enabled: true }, observational: { enabled: true }, subconscious: { enabled: true } });
+    const mem = makeAgentMemory(r, t.paths, KEYS);
+    expect(mem?.memory.getMergedThreadConfig({}).observationalMemory).toBeTruthy();
+    await mem?.close();
   });
 });
 
@@ -143,9 +137,12 @@ describe("secret patterns", () => {
 });
 
 describe("instructions", () => {
-  it("tell the agent to edit working memory instead of rebuilding it", () => {
-    const text = buildInstructions(tmpHome(), "Asia/Kolkata", new Date("2026-10-03T00:00:00Z"));
+  it("tell the agent to edit working memory instead of rebuilding it, and only when it has working memory", () => {
+    const t = tmpAgent();
+    const text = buildInstructions(t.r, t.paths, new Date("2026-10-03T00:00:00Z"));
     expect(text).toMatch(/<memory_rules>[\s\S]*change only what changed[\s\S]*<\/memory_rules>/);
     expect(text.indexOf("<memory_rules>")).toBeLessThan(text.indexOf("Current time:"));
+    const off = tmpAgent({ memory: { workingMemory: { enabled: false } } });
+    expect(buildInstructions(off.r, off.paths)).not.toContain("<memory_rules>");
   });
 });

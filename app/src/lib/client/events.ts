@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { mutate } from "swr";
 import { telegramNodeId, type AgentEvent, type AgentRuntime, type GetAgentResponse, type TelegramRuntime, type TriggerRuntime } from "@eigen/engine/schema";
 import { keys } from "@/lib/client/api";
-import { SKILLS_KEY } from "@/lib/client/library";
+import { skillsKey } from "@/lib/client/library";
 import { refreshTriggerRuns } from "@/lib/client/triggers";
 import type { FleetResponse } from "@/lib/types";
 
@@ -16,7 +16,7 @@ export function onAgentEvent(l: Listener) {
   return () => void listeners.delete(l);
 }
 
-/** Agent ids an inspector is waiting on after a save; it reports the reload itself, so the global toast stays quiet. */
+/** Agent ids a builder is waiting on after Apply; it reports the reload itself, so the global toast stays quiet. */
 export const awaitingReload = new Set<string>();
 
 export type StreamState = { engine: "online" | "offline" | "unknown"; connected: boolean };
@@ -97,13 +97,14 @@ export const applyTriggerToAgent = (a: GetAgentResponse, t: TriggerRuntime): Get
 
 /**
  * Cache work that belongs to the data layer, done once per event before listeners run, so it holds whichever components are mounted:
- * a trigger patches the fleet and agent caches and refetches that agent's run log (a finished run is the newest entry); anything that
- * can change an agent's skills.inherit refreshes the skill list's usedBy.
+ * a trigger patches the fleet and agent caches and refetches that agent's run log (a finished run is the newest entry); a reload or removal
+ * refreshes that agent's skill list (skills.enabled may have changed), and a fleet change refreshes every agent's.
  */
 function patchCaches(ev: AgentEvent) {
   if (ev.type === "agent.trigger") {
     void mutate(keys.fleet, (f?: FleetResponse) => f && applyTriggerToFleet(f, ev.id, ev.trigger), { revalidate: false });
     void mutate(keys.agent(ev.id), (a?: GetAgentResponse) => a && applyTriggerToAgent(a, ev.trigger), { revalidate: false });
     void refreshTriggerRuns(ev.id);
-  } else if (ev.type === "agent.loaded" || ev.type === "agent.removed" || ev.type === "fleet.changed") void mutate(SKILLS_KEY);
+  } else if (ev.type === "agent.loaded" || ev.type === "agent.removed") void mutate(skillsKey(ev.id));
+  else if (ev.type === "fleet.changed") void mutate((k) => typeof k === "string" && /^\/api\/agents\/[^/]+\/skills$/.test(k));
 }

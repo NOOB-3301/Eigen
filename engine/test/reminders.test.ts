@@ -4,16 +4,17 @@ import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { describe, expect, it } from "vitest";
 import { makeScheduleTool, pruneOneShots } from "../src/mastra/lib/tools/schedule.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
 function setup() {
-  const p = tmpHome();
-  const agent = new Agent({ id: "eigen", name: "eigen", instructions: "t", model: "openai/gpt-5-mini" });
-  const mastra = new Mastra({ agents: { eigen: agent }, storage: new LibSQLStore({ id: "t", url: `file:${join(p.dataDir, "r.db")}` }) });
+  const p = tmpAgent().paths;
+  const model = { id: "fake/model", url: "http://127.0.0.1:9/v1" } as const;
+  const agents = { eigen: new Agent({ id: "eigen", name: "eigen", instructions: "t", model }), other: new Agent({ id: "other", name: "other", instructions: "t", model }) };
+  const mastra = new Mastra({ agents, storage: new LibSQLStore({ id: "t", url: `file:${join(p.dataDir, "r.db")}` }) });
   const tool = makeScheduleTool(() => "Asia/Kolkata");
-  const ctx = { mastra, agent: { agentId: "eigen", threadId: "thread-1", resourceId: "telegram:7", toolCallId: "c", messages: [], suspend: async () => {} } };
-  const run = async (input: Record<string, unknown>) => (await tool.execute!(input as never, ctx as never)) as any;
-  return { mastra, tool, run };
+  const as = (agentId: string) => async (input: Record<string, unknown>) =>
+    (await tool.execute!(input as never, { mastra, agent: { agentId, threadId: "thread-1", resourceId: "telegram:7", toolCallId: "c", messages: [], suspend: async () => {} } } as never)) as any;
+  return { mastra, tool, run: as("eigen"), as };
 }
 
 describe("schedule tool", () => {
@@ -55,6 +56,17 @@ describe("schedule tool", () => {
     expect(await mastra.schedules.get(id)).not.toBeNull();
   });
 
+  it("is scoped to the calling agent: another agent can neither list nor change its reminders", async () => {
+    const { mastra, run, as } = setup();
+    const { id } = await run({ action: "create", cron: "0 9 * * 1", prompt: "weekly review" });
+    const other = as("other");
+    expect((await other({ action: "list" })).schedules).toEqual([]);
+    for (const action of ["pause", "resume", "delete"]) expect(await other({ action, id }), action).toEqual({ error: `no reminder with id ${id}` });
+    expect(await mastra.schedules.get(id)).toMatchObject({ status: "active" });
+    expect((await other({ action: "create", cron: "0 8 * * *", prompt: "mine" })).prompt).toBe("mine");
+    expect((await run({ action: "list" })).schedules.map((s: any) => s.prompt)).toEqual(["weekly review"]);
+  });
+
   it("reports bad input as an error the model can act on", async () => {
     const { run } = setup();
     expect(await run({ action: "create", prompt: "no cron" })).toEqual({ error: "create needs cron and prompt" });
@@ -66,11 +78,12 @@ describe("schedule tool", () => {
     const { mastra, run } = setup();
     const once = await run({ action: "create", cron: "0 9 * * *", prompt: "once", once: true });
     const keep = await run({ action: "create", cron: "0 9 * * *", prompt: "recurring" });
-    expect(await pruneOneShots(mastra.schedules)).toBe(0);
+    expect(await pruneOneShots(mastra.schedules, "eigen")).toBe(0);
     const store = await mastra.getStorage()!.getStore("schedules");
     const { nextFireAt } = (await mastra.schedules.get(once.id)) as any;
     await store!.updateScheduleNextFire(once.id, nextFireAt, nextFireAt + 86_400_000, Date.now(), "run-1");
-    expect(await pruneOneShots(mastra.schedules)).toBe(1);
+    expect(await pruneOneShots(mastra.schedules, "other")).toBe(0); // another agent's prune never touches it
+    expect(await pruneOneShots(mastra.schedules, "eigen")).toBe(1);
     expect(await mastra.schedules.get(once.id)).toBeNull();
     expect(await mastra.schedules.get(keep.id)).not.toBeNull();
   });

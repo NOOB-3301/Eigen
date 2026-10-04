@@ -5,9 +5,10 @@ import { failure, guard, json, readBody } from "@/lib/server/http";
 
 export const dynamic = "force-dynamic";
 
-const NodeKey = z.string().regex(/^(agent|channel|mcp):[A-Za-z0-9_./-]{1,80}$/);
+/** Fleet node ids (agent:<id>, channel:telegram:<id>, mcp:<id>/<server>) and builder node ids (builder:<id>:<component>). */
+const NodeKey = z.string().regex(/^(agent|channel|mcp|builder):[A-Za-z0-9_.:/@-]{1,120}$/);
 const Point = z.object({ x: z.number().finite().min(-1e6).max(1e6), y: z.number().finite().min(-1e6).max(1e6) });
-const LayoutBody = z.record(NodeKey, Point).refine((l) => Object.keys(l).length <= 500, "too many nodes");
+const LayoutBody = z.record(NodeKey, Point).refine((l) => Object.keys(l).length <= 2000, "too many nodes");
 
 export async function GET(req: Request) {
   const blocked = guard(req);

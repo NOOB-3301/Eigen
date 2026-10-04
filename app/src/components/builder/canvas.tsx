@@ -4,7 +4,7 @@ import { Background, BackgroundVariant, ConnectionMode, Controls, ReactFlow, Rea
 import { useReducedMotion } from "motion/react";
 import type { BuilderLayout, VNode } from "./layout";
 import { builderEdgeTypes, type LinkEdgeT } from "./edges";
-import { builderNodeTypes, type BuilderNode } from "./nodes";
+import { RECEIVES, builderNodeTypes, type BuilderNode } from "./nodes";
 
 /** Room left around the composition for the toolbar (top) and the apply bar (bottom). */
 const FIT_PADDING = { top: "128px", bottom: "104px", left: "32px", right: "32px" } as const;
@@ -24,7 +24,7 @@ type Props = {
   /** A node was clicked or activated with Enter. */
   onActivate: (nodeId: string) => void;
   onPaneClick: () => void;
-  /** A cable was dragged from a ghost to the agent (or the other way). */
+  /** A cable was dragged from a ghost to what it feeds (or the other way). */
   onConnectGhost: (nodeId: string) => void;
   /** Delete was pressed on a selected component or cable. */
   onDelete: (nodeId: string) => void;
@@ -43,7 +43,7 @@ export function BuilderCanvas(props: Props) {
 function ariaFor(v: VNode): string | undefined {
   switch (v.type) {
     case "agent":
-      return "The agent. Press Enter to edit its name, limits and delegation.";
+      return "The agent. Press Enter to edit its name, role, time zone and limits.";
     case "item":
       return `${v.item.title}, ${v.item.type}, ${v.item.connected ? "connected" : "switched off"}. Press Enter to edit it${v.item.locked ? "." : ", Delete to disconnect it."}`;
     case "ghost":
@@ -51,7 +51,7 @@ function ariaFor(v: VNode): string | undefined {
     case "overflow":
       return `${v.items.length} more connected ${v.kind === "mcp" ? "MCP servers" : "skills"}. Press Enter to manage them.`;
     case "adder":
-      return v.adder === "private-mcp" ? "Add an MCP server" : v.adder === "trigger" ? "Add a trigger" : "Open the list of components that are not connected";
+      return v.adder === "mcp" ? "Add an MCP server" : v.adder === "trigger" ? "Add a trigger" : "Open this agent's skill library";
     case "label":
       return undefined;
   }
@@ -73,7 +73,8 @@ function toNodes(vnodes: VNode[], selectedId: string | null, prev: BuilderNode[]
     focusable: v.type !== "label",
     // Delete on a node is handled by onKeyDown, so it also works on a node that is focused but not selected.
     deletable: false,
-    connectable: v.type === "ghost",
+    // Ghosts are dragged from; the agent and the chain nodes that receive cables are dropped on.
+    connectable: v.type === "ghost" || v.type === "agent" || RECEIVES.has(v.id),
     selected: v.id === selectedId,
     ariaLabel: ariaFor(v),
     ...(v.type === "label" ? { style: { pointerEvents: "none" as const } } : {}),
@@ -124,9 +125,9 @@ function Flow({ layout, selectedId, phone, onActivate, onPaneClick, onConnectGho
       layout.edges.map((e) => ({
         id: e.id,
         source: e.source,
-        target: "agent",
+        target: e.target,
         sourceHandle: "out",
-        targetHandle: e.side === "stack" ? "left" : e.side,
+        targetHandle: e.targetHandle,
         type: "link",
         selectable: !!e.item && !e.item.locked,
         focusable: false,
@@ -136,7 +137,9 @@ function Flow({ layout, selectedId, phone, onActivate, onPaneClick, onConnectGho
     [layout.edges],
   );
 
-  const ghosts = useMemo(() => new Set(layout.nodes.filter((n) => n.type === "ghost" && !n.item.blocked).map((n) => n.id)), [layout.nodes]);
+  // A ghost may be wired to what it would feed: a memory block to the storage, the storage to the LLM, a tool to the agent.
+  const ghosts = useMemo(() => new Map(layout.nodes.flatMap((n) => (n.type === "ghost" && !n.item.blocked ? [[n.id, n.item.targets] as const] : []))), [layout.nodes]);
+  const fits = useCallback((a: string, b: string) => !!ghosts.get(a)?.includes(b) || !!ghosts.get(b)?.includes(a), [ghosts]);
 
   useEffect(() => {
     // First paint: the whole composition on a desktop; on a phone the agent at a readable size (the rest is a pan away).
@@ -179,15 +182,15 @@ function Flow({ layout, selectedId, phone, onActivate, onPaneClick, onConnectGho
 
   const onConnect = useCallback(
     (c: Connection) => {
-      const other = c.source === "agent" ? c.target : c.source;
-      if (ghosts.has(other)) onConnectGhost(other);
+      if (!fits(c.source, c.target)) return;
+      onConnectGhost(ghosts.has(c.source) && ghosts.get(c.source)!.includes(c.target) ? c.source : c.target);
     },
-    [ghosts, onConnectGhost],
+    [fits, ghosts, onConnectGhost],
   );
 
   const isValidConnection = useCallback(
-    (c: { source: string; target: string }) => (c.source === "agent" && ghosts.has(c.target)) || (c.target === "agent" && ghosts.has(c.source)),
-    [ghosts],
+    (c: { source: string; target: string }) => fits(c.source, c.target),
+    [fits],
   );
 
   // The graph is derived from the draft, so the canvas never removes anything itself: Delete asks the builder to disconnect, and we veto the removal.

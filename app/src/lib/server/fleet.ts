@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { agentDir, instructionsPath, listAgentIds, readAgent, validateAgent } from "@eigen/engine/store";
+import { secretStatuses } from "@eigen/engine/envfile";
+import { agentPaths, machineTimezone } from "@eigen/engine/home";
+import { listAgentIds, readAgent, validateAgent } from "@eigen/engine/store";
 import {
   buildTopology,
   fleetProblems,
+  missingKeys,
   resolveAgent,
   type AgentConfig,
   type AgentRuntime,
@@ -12,158 +14,87 @@ import {
   type ListAgentsResponse,
   type ResolvedAgent,
 } from "@eigen/engine/schema";
-import type { Config } from "@eigen/engine/config";
 import { engineSnapshot } from "./engine";
-import { paths, rootConfig, scrubPaths } from "./home";
-import type { FleetResponse, RootInfo } from "@/lib/types";
+import { paths, scrubPaths } from "./home";
+import type { FleetResponse } from "@/lib/types";
 
-type Scanned = { id: string; config?: AgentConfig; raw: Record<string, unknown>; resolved?: ResolvedAgent; problems: string[]; etag: string };
+type Scanned = { id: string; raw: Record<string, unknown>; config?: AgentConfig; resolved?: ResolvedAgent; problems: string[]; etag: string };
 
-/** Mirrors the engine's scan (lib/agents.ts) so the studio shows the same problems while the engine is down. */
-function scan(root: Config): Scanned[] {
+/** Is NAME set in this agent's .env? Asked of the file's statuses, so no value is ever held here. */
+function keyChecker(id: string): (name: string) => boolean {
+  const set = new Set(secretStatuses(agentPaths(paths(), id).envFile, new Map()).flatMap((s) => (s.set ? [s.name] : [])));
+  return (name) => set.has(name);
+}
+
+/** The problems the engine would report for one agent's files, short of what only a running engine knows (bot tokens, MCP servers). */
+function problemsOf(id: string, raw: unknown, parseError?: string): { config?: AgentConfig; problems: string[] } {
+  if (parseError) return { problems: [`config.json is not valid JSON: ${parseError}`] };
+  // Storage clashes are judged across the fleet in scan() (the first agent by id keeps the database, as in the engine), not pairwise.
+  const { issues, parsed } = validateAgent(paths(), id, raw, { others: [] });
+  if (!parsed) return { problems: issues };
+  const keys = parsed.enabled ? missingKeys(parsed, keyChecker(id)) : [];
+  return { config: parsed, problems: [...issues, ...keys] };
+}
+
+/** Mirrors the engine's scan so the studio shows the same agents and problems while the engine is down. */
+function scan(): Scanned[] {
   const p = paths();
   const out: Scanned[] = [];
   for (const id of listAgentIds(p)) {
-    let a;
-    try {
-      a = readAgent(p, id);
-    } catch {
-      continue; // folder name that is not a valid id: the engine ignores it too
-    }
+    const a = readAgent(p, id);
     if (!a) continue;
-    const raw = (a.config ?? {}) as Record<string, unknown>;
-    // rev covers the prompt too, so an instructions-only edit still counts as a fleet change.
-    const etag = `${a.etag}.${createHash("sha256").update(a.instructionsText ?? "").digest("hex").slice(0, 8)}`;
-    if (a.parseError) {
-      out.push({ id, raw, problems: [`config.json is not valid JSON: ${a.parseError}`], etag });
-      continue;
-    }
-    const { issues, parsed } = validateAgent(p, id, a.config, root);
-    const problems = [...issues];
-    const file = parsed && !parsed.instructions.inline ? instructionsPath(agentDir(p, id), parsed.instructions.file) : undefined;
-    if (parsed && !parsed.instructions.inline && file && !existsSync(file))
-      problems.push(`instructions file ${parsed.instructions.file} is missing`);
-    out.push({ id, raw, config: parsed, problems, etag, resolved: parsed && !problems.length ? resolveAgent(parsed, root) : undefined });
+    const raw = (a.config && typeof a.config === "object" ? a.config : {}) as Record<string, unknown>;
+    const { config, problems } = problemsOf(id, a.config, a.parseError);
+    out.push({ id, raw, config, problems, etag: a.etag });
   }
   const cross = fleetProblems(out.flatMap((s) => (s.config && !s.problems.length ? [s.config] : [])));
-  for (const s of out) {
-    const msgs = cross[s.id];
-    if (msgs?.length) {
-      s.problems.push(...msgs);
-      delete s.resolved;
-    }
-  }
-  return Object.assign(out, { fleet: cross["*"] ?? [] });
+  for (const s of out) s.problems.push(...(cross[s.id] ?? []));
+  for (const s of out) if (s.config && !s.problems.length) s.resolved = resolveAgent(s.config, machineTimezone());
+  return out;
 }
 
 const str = (v: unknown, fallback: string) => (typeof v === "string" && v ? v : fallback);
 
-function summaryOf(s: Scanned, root: Config): AgentSummary {
-  const r = s.resolved;
+/** One agent's card, from whatever could be read: the parsed config when it is valid, else the raw fields, else the id. */
+export function summaryOf(s: Pick<Scanned, "id" | "raw" | "config" | "problems">): AgentSummary {
   const c = s.config;
   return {
     id: s.id,
-    name: r?.name ?? c?.name ?? str(s.raw.name, s.id),
-    role: r?.role ?? c?.role ?? str(s.raw.role, ""),
-    description: r?.description ?? c?.description ?? str(s.raw.description, ""),
+    name: c?.name ?? str(s.raw.name, s.id),
+    role: c?.role ?? str(s.raw.role, ""),
+    description: c?.description ?? str(s.raw.description, ""),
     enabled: c?.enabled ?? s.raw.enabled !== false,
-    primary: r?.primary ?? c?.primary ?? s.raw.primary === true,
-    modelKey: r?.modelKey ?? c?.model ?? str(s.raw.model, root.defaultModel),
-    telegram: r?.telegram ?? { enabled: false, allowedUserIds: [], source: "root" },
+    modelKey: c?.model ?? str(s.raw.model, ""),
+    telegram: { enabled: c?.telegram.enabled ?? false, allowedUserIds: c?.telegram.allowedUserIds ?? [] },
     runtime: { status: "offline", problems: s.problems.map(scrubPaths) },
   };
 }
 
-/** What we can say from disk alone: every status is "offline" (the engine is the only one who knows what is loaded). */
-export function offlineSnapshot(root: Config): ListAgentsResponse {
-  const scanned = scan(root) as Scanned[] & { fleet: string[] };
-  const summaries = scanned.map((s) => summaryOf(s, root));
+/** What can be said from disk alone: every status is "offline" (only the engine knows what is loaded). */
+export function offlineSnapshot(): ListAgentsResponse {
+  const scanned = scan();
+  const summaries = scanned.map(summaryOf);
   const resolved = scanned.flatMap((s) => (s.resolved ? [s.resolved] : []));
   const rev = createHash("sha256")
     .update(scanned.map((s) => `${s.id}:${s.etag}`).join("|"))
     .digest("hex")
     .slice(0, 12);
-  return { agents: summaries, fleetProblems: scanned.fleet, topology: buildTopology(summaries, resolved, root), rev };
+  return { agents: summaries, fleetProblems: [], topology: buildTopology(summaries, resolved), rev };
 }
 
-const OVERRIDABLE = ["model", "limits.maxSteps", "memory.lastMessages", "memory.semanticRecall", "memory.observational"] as const;
-
-/** Which inheritable fields each agent file sets itself (read from disk, so it works with or without the engine). */
-function overridesFromDisk(): Record<string, string[]> {
-  const p = paths();
-  const out: Record<string, string[]> = {};
-  for (const id of listAgentIds(p)) {
-    try {
-      const raw = readAgent(p, id)?.config as Record<string, unknown> | undefined;
-      if (!raw) continue;
-      out[id] = OVERRIDABLE.filter((path) => path.split(".").reduce<unknown>((o, k) => (o && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined), raw) !== undefined);
-    } catch {
-      /* invalid folder name */
-    }
-  }
-  return out;
-}
-
+/** GET /api/agents: the engine's snapshot when it answers, else one computed from the folders. */
 export async function fleet(): Promise<FleetResponse> {
-  let root: Config;
-  try {
-    root = rootConfig();
-  } catch (e) {
-    return { agents: [], fleetProblems: [scrubPaths((e as Error).message)], topology: { nodes: [], edges: [] }, rev: "0", engine: "offline", overrides: {}, rootError: true };
-  }
   const live = await engineSnapshot();
-  const overrides = overridesFromDisk();
-  if (live) return { ...live, engine: "online", overrides };
-  return { ...offlineSnapshot(root), engine: "offline", overrides };
+  if (live) return { ...live, engine: "online" };
+  return { ...offlineSnapshot(), engine: "offline" };
 }
 
-/** Non-secret root info for the editor: model keys and ids, MCP server names, inherited defaults. No URLs, env names or values. */
-export function rootInfo(): RootInfo {
-  const root = rootConfig();
-  return {
-    telegram: { tokenEnv: root.telegram.tokenEnv, allowedUserIds: root.telegram.allowedUserIds },
-    defaultModel: root.defaultModel,
-    models: Object.entries(root.models).map(([key, m]) => ({ key, id: m.id, contextWindow: m.contextWindow })),
-    mcpServers: Object.entries(root.mcpServers).map(([name, s]) => ({ name, enabled: s.enabled, trusted: s.trusted })),
-    defaults: {
-      maxSteps: root.limits.maxSteps,
-      lastMessages: root.memory.lastMessages,
-      semanticRecall: root.memory.semanticRecall,
-      observational: { enabled: root.memory.observational.enabled },
-    },
-  };
-}
-
-/** Removes secrets and endpoints from a resolved agent: model/embedder URLs and env names, MCP env/header values. */
-function publicResolved(r: ResolvedAgent): ResolvedAgent {
-  const own = Object.fromEntries(
-    Object.entries(r.mcp.own).map(([name, s]) => {
-      const safe = { ...s } as Record<string, unknown>;
-      for (const k of ["env", "headers"] as const) if (safe[k]) safe[k] = Object.fromEntries(Object.keys(safe[k] as object).map((h) => [h, "•••"]));
-      return [name, safe];
-    }),
-  ) as ResolvedAgent["mcp"]["own"];
-  return {
-    ...r,
-    model: { id: r.model?.id ?? "", replyReserve: r.model?.replyReserve ?? 0, contextWindow: r.model?.contextWindow },
-    memory: { ...r.memory, embedder: { id: r.memory.embedder.id } },
-    mcp: { ...r.mcp, own },
-  };
-}
-
+/** GET /api/agents/:id: the files as the editor sees them, plus what the engine says is running (or the offline problems). */
 export async function agentDetail(id: string): Promise<GetAgentResponse | null> {
-  const p = paths();
-  const a = readAgent(p, id);
+  const a = readAgent(paths(), id);
   if (!a) return null;
-  const root = rootConfig();
-  let resolved: ResolvedAgent | null = null;
-  let problems: string[] = [];
-  if (a.parseError) problems = [`config.json is not valid JSON: ${a.parseError}`];
-  else {
-    const v = validateAgent(p, id, a.config, root);
-    problems = v.issues;
-    if (v.parsed && !v.issues.length) resolved = publicResolved(resolveAgent(v.parsed, root));
-  }
+  const { config, problems } = problemsOf(id, a.config, a.parseError);
+  const resolved = config && !problems.length ? resolveAgent(config, machineTimezone()) : null;
   const live = await engineSnapshot(800);
   const runtime: AgentRuntime = live?.agents.find((s) => s.id === id)?.runtime ?? { status: "offline", problems };
   return { config: a.config, resolved, instructionsText: a.instructionsText, soulText: a.soulText, runtime: { ...runtime, problems: runtime.problems.map(scrubPaths) }, etag: a.etag };

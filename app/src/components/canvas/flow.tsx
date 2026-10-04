@@ -19,9 +19,9 @@ type Props = {
   onSelect: (id: string | null) => void;
   /** Double-clicking an agent opens its builder. */
   onOpenBuilder: (id: string) => void;
-  /** Width in px covered by the inspector on the right, so focusing centers in the visible area. */
+  /** Width in px covered by the summary card on the right, so focusing centers in the visible area. */
   occludedRight: number;
-  /** Width the inspector takes when open (used before it is open, when a click is about to open it). */
+  /** Width the card takes when open (used before it is open, when a click is about to open it). */
   drawerWidth: number;
   apiRef: Ref<CanvasApi>;
 };
@@ -37,9 +37,9 @@ export function Canvas(props: Props) {
 const LEAVE_MS = 280;
 
 function ariaFor(n: Topology["nodes"][number]): string {
-  if (n.type === "agent") return `Agent ${n.data.name}${n.data.primary ? ", primary" : ""}, ${STATUS[n.data.runtime.status].label}${n.data.runtime.problems.length ? `, ${n.data.runtime.problems.length} problems` : ""}`;
-  if (n.type === "channel") return `Telegram bot${n.data.username ? ` @${n.data.username}` : ""} for ${n.data.routesTo || "nobody"}, ${n.data.state}`;
-  return `Tool server ${n.data.name}`;
+  if (n.type === "agent") return `Agent ${n.data.name}, ${STATUS[n.data.runtime.status].label}${n.data.runtime.problems.length ? `, ${n.data.runtime.problems.length} problems` : ""}`;
+  if (n.type === "channel") return `Telegram bot${n.data.username ? ` @${n.data.username}` : ""} of ${n.data.agentId}, ${n.data.state}`;
+  return `Tool server ${n.data.name} of ${n.data.agentId}`;
 }
 
 function toNodes(fleet: FleetResponse, positions: Layout, prev: Map<string, StudioNode>, initial: boolean): StudioNode[] {
@@ -49,7 +49,7 @@ function toNodes(fleet: FleetResponse, positions: Layout, prev: Map<string, Stud
     // First paint: one orchestrated sweep left to right. Later arrivals animate on their own.
     const enterDelay = initial ? Math.min(0.5, Math.max(0, pos.x) / 1600) : 0;
     const base = { id: t.id, position: pos, ariaLabel: ariaFor(t), selected: old?.selected ?? false, width: NODE_SIZE[t.type]!.w };
-    if (t.type === "agent") return { ...base, type: "agent", data: { ...t.data, overrides: fleet.overrides[t.data.id] ?? [], enterDelay } } as StudioNode;
+    if (t.type === "agent") return { ...base, type: "agent", data: { ...t.data, enterDelay } } as StudioNode;
     if (t.type === "channel") return { ...base, type: "channel", data: { ...t.data, offline: fleet.engine === "offline", enterDelay }, selectable: false } as StudioNode;
     return { ...base, type: "mcp", data: { ...t.data, enterDelay }, selectable: false } as StudioNode;
   });
@@ -115,7 +115,7 @@ function Flow({ fleet, savedLayout, selectedId, onSelect, onOpenBuilder, occlude
     [fleet.topology.edges, selNode],
   );
 
-  /** If the inspector is about to cover the node, pan it into the visible part of the canvas. */
+  /** If the summary card is about to cover the node, pan it into the visible part of the canvas. */
   const revealIfCovered = useCallback(
     (agentId: string) => {
       const n = rf.getNode(agentNodeId(agentId));
@@ -193,7 +193,7 @@ function Flow({ fleet, savedLayout, selectedId, onSelect, onOpenBuilder, occlude
       deleteKeyCode={null}
       selectionKeyCode={null}
       multiSelectionKeyCode={null}
-      aria-label="Agent team canvas"
+      aria-label="Agents canvas"
     >
       <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--canvas-dot)" />
       <Controls showInteractive={false} position="bottom-right" aria-label="Zoom controls" />

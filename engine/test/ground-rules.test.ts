@@ -4,34 +4,36 @@ import { snapshotGroundRules } from "../src/mastra/lib/ground-rules.ts";
 import { buildInstructions } from "../src/mastra/lib/instructions.ts";
 import { orgScopeProcessor, ORGANIZATION_ID } from "../src/mastra/lib/org-scope.ts";
 import { touchesGroundRules } from "../src/mastra/lib/tools/workspace.ts";
-import { tmpHome } from "./helpers/home.ts";
+import type { AgentPaths } from "../src/mastra/lib/home.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
 const at = new Date("2026-10-03T09:00:00Z");
-const write = (p: ReturnType<typeof tmpHome>, text: string) => (mkdirSync(p.sandboxDir, { recursive: true }), writeFileSync(p.groundRulesFile, text));
+const write = (p: AgentPaths, text: string) => (mkdirSync(p.sandboxDir, { recursive: true }), writeFileSync(p.groundRulesFile, text));
 
 describe("ground rules in the prompt", () => {
   it("always tells the agent how to record a rule, and says (none yet) without a file", () => {
-    const text = buildInstructions(tmpHome(), "UTC", at);
+    const t = tmpAgent();
+    const text = buildInstructions(t.r, t.paths, at);
     expect(text).toMatch(/<ground_rules>[\s\S]*groundrules\.md[\s\S]*\(none yet\)[\s\S]*<\/ground_rules>/);
   });
 
-  it("loads the file on every call, between the soul and the memory", () => {
-    const p = tmpHome();
-    writeFileSync(p.soulFile, "Voice: dry");
+  it("loads the file on every call, after the soul", () => {
+    const { r, paths: p } = tmpAgent({ soul: { enabled: true } });
+    writeFileSync(`${p.dir}/soul.md`, "Voice: dry");
     write(p, "- Never reply to stashcubby (2026-10-03)");
-    const text = buildInstructions(p, "UTC", at);
+    const text = buildInstructions(r, p, at);
     expect(text).toContain("- Never reply to stashcubby (2026-10-03)");
     expect(text).not.toContain("(none yet)");
-    const order = ["<soul>", "<ground_rules>", "<memory>", "Current time:"].map((s) => text.indexOf(s));
+    const order = ["<soul>", "<ground_rules>", "Current time:"].map((s) => text.indexOf(s));
     expect(order.every((i) => i >= 0) && [...order].sort((a, b) => a - b).join() === order.join()).toBe(true);
     write(p, "- Always answer in one line");
-    expect(buildInstructions(p, "UTC", at)).toContain("Always answer in one line");
+    expect(buildInstructions(r, p, at)).toContain("Always answer in one line");
   });
 
   it("caps a runaway rules file", () => {
-    const p = tmpHome();
+    const { r, paths: p } = tmpAgent();
     write(p, "x".repeat(20_000));
-    const text = buildInstructions(p, "UTC", at);
+    const text = buildInstructions(r, p, at);
     expect(text).toContain("[rules truncated]");
     expect(text.length).toBeLessThan(20_000);
   });
@@ -39,7 +41,7 @@ describe("ground rules in the prompt", () => {
 
 describe("ground rules history", () => {
   it("does nothing without a file, snapshots each changed version once, and keeps the newest 100", () => {
-    const p = tmpHome();
+    const p = tmpAgent().paths;
     expect(snapshotGroundRules(p)).toBeUndefined();
     write(p, "- rule one");
     expect(snapshotGroundRules(p, new Date("2026-10-03T09:00:00Z"))).toBeDefined();

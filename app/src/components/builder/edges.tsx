@@ -10,7 +10,7 @@ import type { Group, Ref } from "./model";
 export type LinkData = { group: Group; connected: boolean; /** The node this cable belongs to (the component end). */ nodeId: string; title: string; ref: Ref | null; /** Phone layout: cables run up a spine to the left of the column. */ stack?: boolean };
 export type LinkEdgeT = Edge<LinkData, "link">;
 
-/** A cable from a component to the agent. It carries the disconnect button: hover or select the cable (or its node) to see it, Delete does the same. */
+/** A cable from a component to what it feeds (the agent, or the next node of the memory chain). It carries the disconnect button: hover or select the cable (or its node) to see it, Delete does the same. */
 export const LinkEdge = memo(function LinkEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps<LinkEdgeT>) {
   const api = useBuilder();
   const stack = data?.stack === true;
@@ -23,7 +23,7 @@ export const LinkEdge = memo(function LinkEdge({ id, sourceX, sourceY, targetX, 
   const connected = data?.connected ?? true;
   const active = api.hovered === data?.nodeId || api.selectedId === data?.nodeId || selected;
   const ref = data?.ref ?? null;
-  const verb = ref?.kind === "trigger" ? (connected ? "Switch off" : "Switch on") : "Disconnect";
+  const verb = ref?.kind === "trigger" || ref?.kind === "mcp" ? (connected ? "Switch off" : "Switch on") : "Disconnect";
   return (
     <>
       <BaseEdge

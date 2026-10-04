@@ -5,16 +5,22 @@ type Listener = () => void;
 type Hub = { home: string; listeners: Set<Listener>; watchers: FSWatcher[]; timer?: NodeJS.Timeout };
 
 /**
- * One process-wide watcher on ~/.eigen/.agents (recursive) and the root config.json, fanned out to every
- * open fallback SSE stream. Debounced because an atomic save is a write + rename. Survives dev HMR via globalThis.
+ * One process-wide watcher on ~/.eigen/agents (recursive), fanned out to every open fallback SSE stream. Every agent's files live
+ * under it, so nothing else needs watching. Debounced because an atomic save is a write + rename. Survives dev HMR via globalThis.
  */
 const g = globalThis as typeof globalThis & { __eigenWatchHub?: Hub };
+
+/**
+ * Writes that say nothing about an agent's config: temp files, its memory database, and its runtime data and workspace. Paths are relative
+ * to agents/, so data/ and sandbox/ are only matched one level down (inside an agent), never as an agent named "data".
+ */
+const NOISE = /\.tmp$|memory\.db|^[^\\/]+[\\/](data|sandbox)([\\/]|$)/;
 
 function start(home: string): Hub {
   const p = paths();
   const hub: Hub = { home, listeners: new Set(), watchers: [] };
   const fire = (file?: string | null) => {
-    if (file && /\.tmp$/.test(file)) return;
+    if (file && NOISE.test(file)) return;
     clearTimeout(hub.timer);
     hub.timer = setTimeout(() => hub.listeners.forEach((l) => l()), 150);
   };
@@ -22,12 +28,7 @@ function start(home: string): Hub {
   try {
     hub.watchers.push(watch(p.agentsDir, { recursive: true }, (_e, f) => fire(f && String(f))));
   } catch (e) {
-    console.warn("[eigen] cannot watch agents folder:", (e as Error).message);
-  }
-  try {
-    hub.watchers.push(watch(p.home, (_e, f) => f && String(f) === "config.json" && fire()));
-  } catch {
-    /* root config watching is best-effort */
+    console.warn("[eigen] cannot watch the agents folder:", (e as Error).message);
   }
   return hub;
 }

@@ -1,14 +1,15 @@
 /**
- * ~/.eigen/.env on behalf of the studio (`@eigen/engine/envfile`, server-side only).
+ * One agent's .env (~/.eigen/agents/<id>/.env), on behalf of the studio and the engine (`@eigen/engine/envfile`, server-side only).
+ * Every function takes the path of that file: there is no shared .env.
  *
  * WRITE-ONLY by design: the studio can set or remove a value and can ask whether a name is set, but nothing here hands a
- * value back to a caller outside the engine (`parseEnv` is for the engine's own reload). Config files hold only the NAME of a
- * variable, never the secret. Other lines in the file (comments, variables this module does not manage) are left as they are.
+ * value back to a caller outside the engine (`readEnvFile` is for the engine, which gives each agent its own values). Config files
+ * hold only the NAME of a variable, never the secret. Other lines in the file (comments, unknown variables) are left as they are.
+ * Nothing is ever copied into process.env: one agent's key must never reach another agent, a sandbox command, or an MCP server it did not name.
  */
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { HomePaths } from "./home.ts";
 import { ENV_NAME, type SecretStatus } from "./schema.ts";
 
 const LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=(.*)$/;
@@ -51,70 +52,48 @@ function assertName(name: string) {
   if (!ENV_NAME.test(name)) throw new Error(`invalid variable name "${name}" (upper-case letters, digits and "_", starting with a letter)`);
 }
 
-const readText = (p: HomePaths) => (existsSync(p.envFile) ? readFileSync(p.envFile, "utf8") : "");
+const readText = (file: string) => (existsSync(file) ? readFileSync(file, "utf8") : "");
 
-function writeText(p: HomePaths, text: string) {
-  mkdirSync(dirname(p.envFile), { recursive: true });
-  const tmp = `${p.envFile}.${process.pid}.tmp`;
+function writeText(file: string, text: string) {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600 });
   chmodSync(tmp, 0o600);
-  renameSync(tmp, p.envFile);
+  renameSync(tmp, file);
 }
 
 const keyOf = (line: string) => LINE.exec(line)?.[1];
 
 /** Sets NAME to value. Replaces the last existing line for NAME (and drops earlier duplicates), else appends. The file stays 0600. */
-export function setSecret(p: HomePaths, name: string, value: string) {
+export function setSecret(file: string, name: string, value: string) {
   assertName(name);
   const entry = `${name}=${formatValue(value)}`;
-  const lines = readText(p).split("\n");
+  const lines = readText(file).split("\n");
   if (lines.at(-1) === "") lines.pop();
   const last = lines.findLastIndex((l) => keyOf(l) === name);
   const next = last === -1 ? [...lines, entry] : lines.flatMap((l, i) => (i === last ? [entry] : keyOf(l) === name ? [] : [l]));
-  writeText(p, `${next.join("\n")}\n`);
+  writeText(file, `${next.join("\n")}\n`);
 }
 
 /** Removes every line for NAME. Returns false when there was none. */
-export function unsetSecret(p: HomePaths, name: string): boolean {
+export function unsetSecret(file: string, name: string): boolean {
   assertName(name);
-  const lines = readText(p).split("\n");
+  const lines = readText(file).split("\n");
   const kept = lines.filter((l) => keyOf(l) !== name);
   if (kept.length === lines.length) return false;
-  writeText(p, kept.join("\n"));
+  writeText(file, kept.join("\n"));
   return true;
 }
 
-/** For the studio: is each referenced name set (non-empty) in .env? Never returns a value. */
-export function secretStatuses(p: HomePaths, referenced: Map<string, string[]>): SecretStatus[] {
-  const file = parseEnv(readText(p));
-  return [...referenced].map(([name, usedBy]) => ({ name, set: !!file.get(name), usedBy })).sort((a, b) => a.name.localeCompare(b.name));
+/**
+ * For the studio: is each referenced name set (non-empty) in the agent's .env? Names set in the file but referenced by nothing are listed too
+ * (usedBy: []), so a stale key can be seen and removed. Never returns a value.
+ */
+export function secretStatuses(file: string, referenced: Map<string, string[]>): SecretStatus[] {
+  const values = parseEnv(readText(file));
+  const names = new Set([...referenced.keys(), ...[...values.keys()].filter((n) => ENV_NAME.test(n))]);
+  return [...names].map((name) => ({ name, set: !!values.get(name), usedBy: referenced.get(name) ?? [] })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/**
- * Engine side: mirrors .env into `env` after the file changed, so a key added in the studio works without a restart.
- * `owned` remembers what we applied. A variable that came from somewhere else (the shell) and differs from the file is left
- * alone, and a variable we applied is removed again when its line disappears. Returns the names whose value changed.
- */
-export function syncEnv(p: HomePaths, owned: Map<string, string>, env: NodeJS.ProcessEnv = process.env): string[] {
-  const file = parseEnv(readText(p));
-  const changed: string[] = [];
-  for (const [k, v] of file) {
-    const cur = env[k];
-    const mine = owned.get(k);
-    const first = mine === undefined && cur === v; // the CLI already loaded it: adopt it
-    if (cur === undefined || cur === mine || first) {
-      if (cur !== v) changed.push(k);
-      env[k] = v;
-      owned.set(k, v);
-    }
-  }
-  for (const [k, v] of [...owned]) {
-    if (file.has(k)) continue;
-    if (env[k] === v) {
-      delete env[k];
-      changed.push(k);
-    }
-    owned.delete(k);
-  }
-  return changed;
-}
+/** Engine side: the agent's variables, read fresh. Empty when the file is missing. The caller keeps them to that agent. */
+export const readEnvFile = (file: string): ReadonlyMap<string, string> => parseEnv(readText(file));

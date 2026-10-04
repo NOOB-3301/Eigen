@@ -1,5 +1,5 @@
 /**
- * What triggers keep on disk, under ~/.eigen/data/triggers/<agent>/:
+ * What triggers keep on disk, in the agent's own folder, under ~/.eigen/agents/<id>/data/triggers/:
  *   runs.jsonl            append-only run history (newest 200)
  *   <trigger>.seen.json   the pull requests a github-pr trigger has already seen, per repo
  * Both are written only with ids the config schema has validated, so a path can never leave that folder.
@@ -7,7 +7,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { truncate } from "lodash-es";
-import type { HomePaths } from "./home.ts";
+import type { AgentPaths } from "./home.ts";
 import { AgentId, TriggerId, type TriggerRun } from "./schema.ts";
 import { redact } from "./secrets.ts";
 
@@ -37,9 +37,10 @@ export function cleanRun(run: TriggerRun, secrets: Array<string | undefined> = [
   };
 }
 
-const agentDir = (p: HomePaths, agentId: string) => join(p.triggersDir, AgentId.parse(agentId));
-export const runsFile = (p: HomePaths, agentId: string) => join(agentDir(p, agentId), "runs.jsonl");
-export const seenFile = (p: HomePaths, agentId: string, triggerId: string) => join(agentDir(p, agentId), `${TriggerId.parse(triggerId)}.seen.json`);
+/** The agent's triggers folder. Its id is checked again here: agentPaths trusts it, and this is where files get written. */
+const dirOf = (a: Pick<AgentPaths, "id" | "triggersDir">) => (AgentId.parse(a.id), a.triggersDir);
+export const runsFile = (a: Pick<AgentPaths, "id" | "triggersDir">) => join(dirOf(a), "runs.jsonl");
+export const seenFile = (a: Pick<AgentPaths, "id" | "triggersDir">, triggerId: string) => join(dirOf(a), `${TriggerId.parse(triggerId)}.seen.json`);
 
 const readRuns = (file: string): TriggerRun[] => {
   if (!existsSync(file)) return [];

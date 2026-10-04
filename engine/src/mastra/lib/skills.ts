@@ -1,10 +1,23 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { isEmpty, sortBy, truncate } from "lodash-es";
 import { parse, parseDocument } from "yaml";
-import type { HomePaths } from "./home.ts";
+import type { AgentPaths } from "./home.ts";
+
+/** The folders of one agent that hold skills: its library (skills/) and the ones it installed or wrote itself (sandbox/skills/). */
+export type SkillPaths = Pick<AgentPaths, "skillsDir" | "sandboxSkillsDir" | "sandboxQuarantineDir">;
 
 export const CLAWHUB_VERSION = "0.23.3";
+
+/**
+ * The engine's built-in skills (engine/defaults/skills), loaded read-only by every agent with the workspace tool. Found from this file in the source
+ * tree, or from the working directory when Mastra runs a bundle (engine/ in dev, engine/.mastra/output after a build). EIGEN_BUILTIN_SKILLS overrides.
+ */
+export function builtinSkillsDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const here = typeof import.meta.dirname === "string" ? [resolve(import.meta.dirname, "../../../defaults/skills")] : [];
+  const candidates = [...(env.EIGEN_BUILTIN_SKILLS ? [env.EIGEN_BUILTIN_SKILLS] : []), ...here, resolve("defaults/skills"), resolve("../../defaults/skills"), resolve("../../../defaults/skills")];
+  return candidates.find((d) => existsSync(join(d, "clawhub", "SKILL.md")) || (d === env.EIGEN_BUILTIN_SKILLS && existsSync(d)));
+}
 
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const MAX_NAME = 64;
@@ -60,7 +73,7 @@ const installedAt = (dir: string) => {
   }
 };
 
-function quarantine(p: HomePaths, dir: string, id: string) {
+function quarantine(p: SkillPaths, dir: string, id: string) {
   const dest = join(p.sandboxQuarantineDir, id.replaceAll("/", "__"));
   mkdirSync(p.sandboxQuarantineDir, { recursive: true });
   rmSync(dest, { recursive: true, force: true });
@@ -70,17 +83,17 @@ function quarantine(p: HomePaths, dir: string, id: string) {
   } catch {}
 }
 
-export const reportFile = (p: HomePaths) => join(p.sandboxQuarantineDir, "REPORT.md");
+export const reportFile = (p: Pick<AgentPaths, "sandboxQuarantineDir">) => join(p.sandboxQuarantineDir, "REPORT.md");
 
 const safe = (s: string) => s.replace(/[^\w@./ ",()'-]/g, "?");
 
 /**
- * Makes the agent's installed skills loadable: fixes names and long descriptions, quarantines skills that are
+ * Makes the skills the agent installed in its sandbox loadable: fixes names and long descriptions, quarantines skills that are
  * broken, contain symlinks, or reuse a name (yours win, then the oldest install), and records what happened.
  */
-export function reconcileSkills(p: HomePaths): Report {
+export function reconcileSkills(p: SkillPaths): Report {
   const taken = new Map<string, string>();
-  for (const f of skillFiles(p.userSkillsDir)) {
+  for (const f of skillFiles(p.skillsDir)) {
     const { name } = readSkill(f);
     if (name) taken.set(name, "one of your skills");
   }

@@ -2,14 +2,17 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFile
 import { dirname, join, resolve } from "node:path";
 import { Agent } from "@mastra/core/agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/mastra/lib/config.ts";
 import { buildInstructions } from "../src/mastra/lib/instructions.ts";
 import { CLAWHUB_VERSION, reconcileSkills, reportFile } from "../src/mastra/lib/skills.ts";
-import { makeWorkspace } from "../src/mastra/lib/tools/workspace.ts";
+import { makeWorkspace, skillPaths } from "../src/mastra/lib/tools/workspace.ts";
+import type { AgentPaths } from "../src/mastra/lib/home.ts";
+import type { AgentConfigInput } from "../src/mastra/lib/schema.ts";
 import { fakeLlm, type Turn } from "./helpers/fake-llm.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
-type P = ReturnType<typeof tmpHome>;
+type P = AgentPaths;
+const tmpHome = () => tmpAgent().paths;
+const BUILTIN = resolve(import.meta.dirname, "../defaults/skills");
 
 /** Writes root/<rel>/SKILL.md with the given raw frontmatter lines. */
 function skill(root: string, rel: string, frontmatter: string, body = "Do the thing.") {
@@ -19,7 +22,7 @@ function skill(root: string, rel: string, frontmatter: string, body = "Do the th
   return file;
 }
 const agentSkill = (p: P, rel: string, fm: string) => skill(p.sandboxSkillsDir, rel, fm);
-const userSkill = (p: P, rel: string, fm: string) => skill(p.userSkillsDir, rel, fm);
+const userSkill = (p: P, rel: string, fm: string) => skill(p.skillsDir, rel, fm);
 const read = (f: string) => readFileSync(f, "utf8");
 
 describe("reconcileSkills", () => {
@@ -105,9 +108,15 @@ describe("reconcileSkills", () => {
   });
 });
 
+/** A workspace for an agent whose config is patched with `patch`; built-in skills only when asked. */
+const workspaceFor = (patch: Partial<AgentConfigInput> = {}, builtin: string | null = null) => {
+  const t = tmpAgent(patch);
+  return { p: t.paths, ws: () => makeWorkspace(t.r, t.paths, { isolation: "none", builtinSkills: builtin }) };
+};
+
 describe("Mastra's real skill loader on the reconciled set", () => {
   it("lists both roots with unique names, and every name resolves", async () => {
-    const p = tmpHome();
+    const { p, ws: make } = workspaceFor();
     userSkill(p, "mine", "name: mine\ndescription: yours");
     agentSkill(p, "@o/good", "name: good\ndescription: fine");
     agentSkill(p, "@o/renamed", "name: Some Other Name\ndescription: gets fixed");
@@ -115,21 +124,42 @@ describe("Mastra's real skill loader on the reconciled set", () => {
     agentSkill(p, "@o/broken", "name: broken");
     reconcileSkills(p);
 
-    const ws = makeWorkspace(p, loadConfig(p.configFile), "none");
+    const ws = make();
     await ws.init();
     const names = (await ws.skills!.list()).map((s) => s.name).sort();
     expect(names).toEqual(["good", "mine", "renamed"]);
     for (const n of names) await expect(ws.skills!.get(n)).resolves.toBeTruthy();
   });
+
+  it("skills.enabled filters the agent's library; its sandbox skills and the built-in ones always load", async () => {
+    const { p, ws: make } = workspaceFor({ skills: { enabled: ["pdf", "@o/charts", "gone"] } }, BUILTIN);
+    userSkill(p, "pdf", "name: pdf\ndescription: pdf");
+    userSkill(p, "@o/charts", "name: charts\ndescription: charts");
+    userSkill(p, "weather", "name: weather\ndescription: not selected");
+    agentSkill(p, "@me/notes", "name: notes\ndescription: written by the agent");
+    const ws = make();
+    await ws.init();
+    expect((await ws.skills!.list()).map((s) => s.name).sort()).toEqual(["charts", "clawhub", "notes", "pdf"]);
+  });
+
+  it("never loads another agent's skills, nor anything outside the three skill folders", async () => {
+    const t = tmpAgent();
+    skill(t.other.skillsDir, "theirs", "name: theirs\ndescription: the other agent's");
+    skill(t.paths.dir, "rogue", "name: rogue\ndescription: in the agent folder, not in skills/");
+    const ws = makeWorkspace(t.r, t.paths, { isolation: "none", builtinSkills: null });
+    await ws.init();
+    expect((await ws.skills!.list()).map((s) => s.name)).toEqual([]);
+    expect(skillPaths(t.paths, ["../../other/skills/theirs", "*"], undefined)).toEqual([`${t.paths.sandboxSkillsDir}/**/SKILL.md`]);
+  });
 });
 
 describe("prompt notes", () => {
   it("shows skill_notes only while there is something to report", () => {
-    const p = tmpHome();
-    expect(buildInstructions(p, "UTC")).not.toContain("<skill_notes>");
+    const { r, paths: p } = tmpAgent();
+    expect(buildInstructions(r, p)).not.toContain("<skill_notes>");
     agentSkill(p, "@o/oops", "name: oops");
     reconcileSkills(p);
-    expect(buildInstructions(p, "UTC")).toMatch(/<skill_notes>\n- REJECTED @o\/oops: missing description/);
+    expect(buildInstructions(r, p)).toMatch(/<skill_notes>\n- REJECTED @o\/oops: missing description/);
   });
 });
 
@@ -140,11 +170,12 @@ describe("skill manager hook (real agent, fake model)", () => {
   });
 
   async function run(turns: Turn[], prepare?: (p: P) => void) {
-    const p = tmpHome();
+    const t = tmpAgent();
+    const p = t.paths;
     prepare?.(p);
     const llm = await fakeLlm(turns);
     closers.push(llm.close);
-    const agent = new Agent({ id: "t", name: "t", instructions: "test", model: { id: "fake/model", url: llm.url }, workspace: makeWorkspace(p, loadConfig(p.configFile), "none") });
+    const agent = new Agent({ id: "t", name: "t", instructions: "test", model: { id: "fake/model", url: llm.url }, workspace: makeWorkspace(t.r, p, { isolation: "none", builtinSkills: null }) });
     await agent.generate("go", { maxSteps: 6 });
     return { p, llm };
   }
@@ -169,7 +200,7 @@ describe("skill manager hook (real agent, fake model)", () => {
 });
 
 describe("built-in clawhub skill", () => {
-  const file = resolve(import.meta.dirname, "../src/mastra/agents/eigen/skills/clawhub/SKILL.md");
+  const file = join(BUILTIN, "clawhub/SKILL.md");
 
   it("has the required frontmatter and pins the same CLI version as the code", () => {
     const text = read(file);

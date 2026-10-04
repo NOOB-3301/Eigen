@@ -1,238 +1,237 @@
 import { describe, expect, it } from "vitest";
-import type { RootInfo } from "../../lib/types";
+import { AgentConfigSchema } from "@eigen/engine/schema";
 import type { Draft } from "../../lib/client/draft";
 import {
-  addPrivateServer,
+  addMcpServer,
   addTrigger,
   connect,
   deriveItems,
   describeChanges,
   disconnect,
+  disconnectWarning,
   freeTriggerId,
   isRisky,
   issuesByNode,
+  modelUsers,
   parseRef,
+  problemsByNode,
   refId,
+  removeMcpServer,
+  removeModel,
   removeTrigger,
-  renamePrivateServer,
-  setSoulSource,
+  renameMcpServer,
+  renameModel,
   soulStarter,
+  storageMoved,
   type Ctx,
   type Ref,
 } from "./model";
 
-const root: RootInfo = {
-  defaultModel: "fast",
-  models: [
-    { key: "fast", id: "provider/fast" },
-    { key: "smart", id: "provider/smart" },
-  ],
-  mcpServers: [
-    { name: "github", enabled: true, trusted: false },
-    { name: "files", enabled: true, trusted: true },
-    { name: "old", enabled: false, trusted: false },
-  ],
-  defaults: { maxSteps: 25, lastMessages: 20, semanticRecall: { enabled: false, topK: 4, messageRange: 2 }, observational: { enabled: false } },
-};
 const skills = [
   { slug: "pdf", name: "pdf", description: "Read and write PDFs" },
   { slug: "web", name: "web", description: "Browse the web" },
   { slug: "sql", name: "sql", description: "Query a database" },
 ];
-const ctx: Ctx = { agentId: "scout", root, skills };
+const ctx: Ctx = { agentId: "scout", skills };
 
 const draft = (config: Record<string, unknown> = {}, extra: Partial<Draft> = {}): Draft => ({
-  config: { id: "scout", name: "Scout", role: "researcher", description: "Finds things.", ...config },
+  config: { id: "scout", name: "Scout", models: { main: { id: "anthropic/claude-sonnet-5-5" } }, model: "main", ...config },
   instructionsText: "You are Scout.\n",
   soulText: "",
   ...extra,
 });
-const on = (d: Draft, kind: Ref["kind"], key?: string) => {
-  const ref = (key === undefined ? { kind } : kind === "skill" ? { kind, slug: key } : kind === "trigger" ? { kind, id: key } : { kind, name: key }) as Ref;
-  return deriveItems(d, ctx).find((i) => i.id === refId(ref))?.connected;
-};
+const item = (d: Draft, id: string, c: Ctx = ctx) => deriveItems(d, c).find((i) => i.id === id);
+const on = (d: Draft, id: string) => item(d, id)?.connected;
+const memory = (d: Draft) => d.config.memory as Record<string, { enabled?: boolean }> | undefined;
+/** Every draft a cascade produces must be one the engine accepts. */
+const valid = (d: Draft) => expect(AgentConfigSchema.safeParse(d.config).success).toBe(true);
 
 describe("refs", () => {
   it("round-trips every kind through its node id", () => {
-    const refs: Ref[] = [{ kind: "model" }, { kind: "soul" }, { kind: "mcp", name: "github" }, { kind: "private-mcp", name: "mine" }, { kind: "skill", slug: "@owner/pdf" }, { kind: "trigger", id: "daily" }, { kind: "telegram" }];
+    const refs: Ref[] = [{ kind: "llm" }, { kind: "storage" }, { kind: "subconscious" }, { kind: "soul" }, { kind: "mcp", name: "github" }, { kind: "skill", slug: "@owner/pdf" }, { kind: "trigger", id: "daily" }, { kind: "telegram" }];
     for (const r of refs) expect(parseRef(refId(r))).toEqual(r);
     expect(parseRef("agent")).toBeNull();
+    expect(parseRef("private-mcp:x")).toBeNull();
   });
 });
 
-describe("what is connected", () => {
-  it("fills in the root defaults the way the engine does", () => {
+describe("what is connected, from the schema defaults", () => {
+  it("a bare config has storage, last messages, working memory and the workspace; nothing else", () => {
     const d = draft();
-    expect(on(d, "recent")).toBe(true); // root lastMessages 20
-    expect(on(d, "semantic")).toBe(false);
-    expect(on(d, "observational")).toBe(false);
-    expect(on(d, "workspace")).toBe(true); // schema default builtin ["workspace"]
-    expect(on(d, "schedule")).toBe(false);
-    expect(on(d, "soul")).toBe(true); // includeSoul defaults to true -> shared
-    expect(on(draft({ instructions: { includeSoul: false } }), "soul")).toBe(false);
-    expect(on(draft({ soul: { source: "none" }, instructions: { includeSoul: true } }), "soul")).toBe(false);
-    expect(on(draft({ memory: { lastMessages: 0 } }), "recent")).toBe(false);
+    expect(["storage", "lastMessages", "workingMemory", "workspace"].map((id) => on(d, id))).toEqual([true, true, true, true]);
+    expect(["semanticRecall", "observational", "subconscious", "soul", "schedule", "telegram"].map((id) => on(d, id))).toEqual([false, false, false, false, false, false]);
+    expect(item(d, "llm")).toMatchObject({ connected: true, title: "main", targets: ["agent"] });
+    expect(item(d, "llm")?.locked).toBeTruthy();
+    expect(item(d, "instructions")?.locked).toBeTruthy();
   });
 
-  it("treats inherit all as the enabled root servers only, and lists every library skill as connected", () => {
-    const d = draft({ tools: { mcp: { inherit: "all" } } });
-    expect([on(d, "mcp", "github"), on(d, "mcp", "files"), on(d, "mcp", "old")]).toEqual([true, true, false]);
-    expect(deriveItems(d, ctx).find((i) => i.id === "mcp:old")?.blocked).toMatch(/Settings/);
-    expect(deriveItems(draft({ tools: { mcp: { inherit: ["github"] } } }), ctx).find((i) => i.id === "mcp:old")?.blocked).toMatch(/Settings/);
-    expect(on(d, "skill", "pdf")).toBe(true); // skills.inherit defaults to all
-    expect(on(draft({ skills: { inherit: "none" } }), "skill", "pdf")).toBe(false);
+  it("draws the chain: memory blocks to storage, storage to the llm, the subconscious to both recall blocks", () => {
+    const d = draft();
+    expect(item(d, "storage")?.targets).toEqual(["llm"]);
+    for (const b of ["lastMessages", "workingMemory", "semanticRecall", "observational"]) expect(item(d, b)?.targets).toEqual(["storage"]);
+    expect(item(d, "subconscious")?.targets).toEqual(["semanticRecall", "observational"]);
+    for (const id of ["soul", "workspace", "telegram"]) expect(item(d, id)?.targets).toEqual(["agent"]);
   });
 
-  it("shows entries that name something that no longer exists, so they can be removed", () => {
-    const d = draft({ tools: { mcp: { inherit: ["github", "gone"] } }, skills: { inherit: ["ghost-skill"] } });
-    const gone = deriveItems(d, ctx).find((i) => i.id === "mcp:gone");
-    expect(gone).toMatchObject({ connected: true });
-    expect(gone?.inactive).toBeTruthy();
-    expect(deriveItems(d, ctx).find((i) => i.id === "skill:ghost-skill")?.inactive).toBeTruthy();
+  it("an MCP server is connected while enabled; skills.enabled all lists the whole library", () => {
+    const d = draft({ tools: { mcp: { gh: { url: "https://x.dev/mcp" }, off: { command: "x", enabled: false } } } });
+    expect([on(d, "mcp:gh"), on(d, "mcp:off")]).toEqual([true, false]);
+    expect(skills.every((s) => on(d, `skill:${s.slug}`))).toBe(true);
+    expect(on(draft({ skills: { enabled: ["web"] } }), "skill:pdf")).toBe(false);
   });
 
-  it("makes the primary's Telegram bot permanent and a specialist's depend on telegram.enabled", () => {
-    const primary = deriveItems(draft({ primary: true }), ctx).find((i) => i.id === "telegram")!;
-    expect(primary).toMatchObject({ connected: true });
-    expect(primary.locked).toBeTruthy();
-    expect(on(draft(), "telegram")).toBe(false);
-    expect(on(draft({ telegram: { enabled: true } }), "telegram")).toBe(true);
-  });
-
-  it("makes one node per trigger, connected while it is enabled", () => {
-    const d = draft({ triggers: [{ id: "daily", type: "cron", cron: "0 9 * * *", prompt: "hi" }, { id: "off", type: "cron", enabled: false, cron: "0 9 * * *", prompt: "hi" }] });
-    expect([on(d, "trigger", "daily"), on(d, "trigger", "off")]).toEqual([true, false]);
-  });
-});
-
-describe("what the engine does with a component, said on the component", () => {
-  const item = (d: Draft, id: string, c: Ctx = ctx) => deriveItems(d, c).find((i) => i.id === id)!;
-
-  it("recent messages off means stateless: it says so, and recall and observation say they have nothing to work with", () => {
-    const d = draft({ memory: { lastMessages: 0, semanticRecall: { enabled: true }, observational: { enabled: true } } });
-    expect(item(d, "recent")).toMatchObject({ connected: false, note: "Stateless: this agent keeps nothing from the conversation." });
-    expect(item(d, "semantic").inactive).toMatch(/Nothing to work with/);
-    expect(item(d, "observational").inactive).toMatch(/Nothing to work with/);
-    const on = draft({ memory: { semanticRecall: { enabled: true } } });
-    expect(item(on, "recent").note).toBeUndefined();
-    expect(item(on, "semantic").inactive).toBeUndefined();
-    // a recall that is off has nothing to warn about
-    expect(item(draft({ memory: { lastMessages: 0 } }), "semantic").inactive).toBeUndefined();
-  });
-
-  it("the schedule tool is not offered to a specialist, and a listed one is flagged as having no effect and removable", () => {
-    const none = item(draft(), "schedule");
-    expect(none).toMatchObject({ connected: false });
-    expect(none.unavailable).toBeTruthy();
-    expect(connect(draft(), { kind: "schedule" }, ctx).config.tools).toBeUndefined(); // nothing is written for a tool that would be ignored
-    const listed = draft({ tools: { builtin: ["workspace", "schedule"] } });
-    expect(item(listed, "schedule")).toMatchObject({ connected: true, inactive: "No effect: only the primary agent can use this tool." });
-    expect(disconnect(listed, { kind: "schedule" }, ctx).config.tools).toEqual({ builtin: ["workspace"] });
-    const primary = draft({ primary: true });
-    expect(item(primary, "schedule").unavailable).toBeUndefined();
-    expect(connect(primary, { kind: "schedule" }, ctx).config.tools).toEqual({ builtin: ["workspace", "schedule"] });
-    expect(item(draft({ primary: true, tools: { builtin: ["schedule"] } }), "schedule").inactive).toBeUndefined();
-  });
-
-  it("a skill that will not load says why: flagged when connected, not connectable when not", () => {
+  it("says when a component is connected but cannot work, and lists skills that are not in the library", () => {
+    const hand = draft({ memory: { storage: { enabled: false } } });
+    expect(item(hand, "lastMessages")?.inactive).toMatch(/Storage is off/);
+    expect(item(hand, "storage")?.note).toMatch(/Stateless/);
+    expect(item(draft({ memory: { subconscious: { enabled: true } } }), "subconscious")?.inactive).toMatch(/semantic recall and observational/);
+    expect(item(draft({ skills: { enabled: ["ghost"] } }), "skill:ghost")?.inactive).toBeTruthy();
+    expect(item(draft({ skills: { enabled: ["ghost"] } }), "skill:ghost", { ...ctx, skillsKnown: false })?.inactive).toBeUndefined();
     const broken: Ctx = { ...ctx, skills: [...skills, { slug: "bad", name: "bad", description: "x", problem: "name does not match the folder" }] };
     expect(item(draft(), "skill:bad", broken)).toMatchObject({ connected: true, inactive: "Won't load: name does not match the folder" });
-    expect(item(draft({ skills: { inherit: ["pdf"] } }), "skill:bad", broken)).toMatchObject({ connected: false, blocked: "Won't load: name does not match the folder" });
-    expect(item(draft(), "skill:pdf", broken).inactive).toBeUndefined();
+    expect(item(draft({ skills: { enabled: ["pdf"] } }), "skill:bad", broken)).toMatchObject({ connected: false, blocked: "Won't load: name does not match the folder" });
   });
 });
 
-describe("connect and disconnect write exactly what the table says", () => {
-  it("memory kinds", () => {
-    expect(disconnect(draft(), { kind: "recent" }, ctx).config.memory).toEqual({ lastMessages: 0 });
-    expect((connect(draft({ memory: { lastMessages: 0 } }), { kind: "recent" }, ctx).config.memory as { lastMessages: number }).lastMessages).toBe(20);
-    expect((connect(draft({ memory: { lastMessages: 0 } }), { kind: "recent" }, { ...ctx, root: { ...root, defaults: { ...root.defaults, lastMessages: 0 } } }).config.memory as { lastMessages: number }).lastMessages).toBe(20);
-    expect(connect(draft(), { kind: "semantic" }, ctx).config.memory).toEqual({ semanticRecall: { enabled: true } });
-    expect(connect(draft(), { kind: "observational" }, ctx).config.memory).toEqual({ observational: { enabled: true } });
-    expect(disconnect(connect(draft(), { kind: "semantic" }, ctx), { kind: "semantic" }, ctx).config.memory).toEqual({ semanticRecall: { enabled: false } });
+describe("connect and disconnect cascade the way the table says", () => {
+  it("storage off takes every memory block with it, and asks first", () => {
+    const full = draft({ memory: { semanticRecall: { enabled: true }, observational: { enabled: true }, subconscious: { enabled: true } } });
+    const off = disconnect(full, { kind: "storage" }, ctx);
+    for (const id of ["storage", "lastMessages", "workingMemory", "semanticRecall", "observational", "subconscious"]) expect(on(off, id)).toBe(false);
+    valid(off);
+    expect(disconnectWarning(full, { kind: "storage" })).toMatch(/^The agent will keep nothing between messages\./);
+    expect(disconnectWarning(full, { kind: "storage" })).toMatch(/last messages/);
+    expect(disconnectWarning(full, { kind: "workspace" })).toBeNull();
+    // Blocks that were already off are not written.
+    expect(memory(disconnect(draft(), { kind: "storage" }, ctx))).toEqual({ storage: { enabled: false }, lastMessages: { enabled: false }, workingMemory: { enabled: false } });
   });
 
-  it("built-in tools add and remove only their own name and never touch the unused \"skills\" entry", () => {
-    const d = draft({ primary: true, tools: { builtin: ["workspace", "skills"] } });
-    expect(connect(d, { kind: "schedule" }, ctx).config.tools).toEqual({ builtin: ["workspace", "skills", "schedule"] });
-    expect(disconnect(d, { kind: "workspace" }, ctx).config.tools).toEqual({ builtin: ["skills"] });
-    expect(connect(connect(d, { kind: "schedule" }, ctx), { kind: "schedule" }, ctx).config.tools).toEqual({ builtin: ["workspace", "skills", "schedule"] });
-    expect(deriveItems(d, ctx).some((i) => i.title.toLowerCase() === "skills" && i.group === "tools" && i.ref.kind !== "skill")).toBe(false);
+  it("a memory block turns storage on when it connects", () => {
+    const stateless = disconnect(draft(), { kind: "storage" }, ctx);
+    for (const b of ["lastMessages", "workingMemory", "semanticRecall", "observational"] as const) {
+      const d = connect(stateless, { kind: b }, ctx);
+      expect([on(d, b), on(d, "storage")]).toEqual([true, true]);
+      valid(d);
+    }
+    expect(memory(connect(draft(), { kind: "semanticRecall" }, ctx))).toEqual({ semanticRecall: { enabled: true } });
   });
 
-  it("root MCP servers: expands all, edits the list, and an empty list becomes none", () => {
-    const all = draft({ tools: { mcp: { inherit: "all" } } });
-    expect(disconnect(all, { kind: "mcp", name: "github" }, ctx).config.tools).toEqual({ mcp: { inherit: ["files"] } });
-    const none = draft();
-    expect(connect(none, { kind: "mcp", name: "github" }, ctx).config.tools).toEqual({ mcp: { inherit: ["github"] } });
-    const one = draft({ tools: { mcp: { inherit: ["github"] } } });
-    expect(connect(one, { kind: "mcp", name: "files" }, ctx).config.tools).toEqual({ mcp: { inherit: ["github", "files"] } });
-    expect(disconnect(one, { kind: "mcp", name: "github" }, ctx).config.tools).toEqual({ mcp: { inherit: "none" } });
-    expect(connect(all, { kind: "mcp", name: "old" }, ctx)).toBe(all); // blocked: it is switched off in Settings
+  it("the subconscious brings semantic recall, observational memory and storage; losing either recall block drops it", () => {
+    const d = connect(disconnect(draft(), { kind: "storage" }, ctx), { kind: "subconscious" }, ctx);
+    for (const id of ["subconscious", "semanticRecall", "observational", "storage"]) expect(on(d, id)).toBe(true);
+    valid(d);
+    for (const b of ["semanticRecall", "observational"] as const) {
+      const x = disconnect(d, { kind: b }, ctx);
+      expect([on(x, b), on(x, "subconscious")]).toEqual([false, false]);
+      valid(x);
+    }
+    const y = disconnect(d, { kind: "subconscious" }, ctx);
+    expect([on(y, "semanticRecall"), on(y, "observational")]).toEqual([true, true]);
   });
 
-  it("skills: same pattern, expanding all into the library", () => {
+  it("last messages and working memory switch only themselves", () => {
+    expect(memory(disconnect(draft(), { kind: "lastMessages" }, ctx))).toEqual({ lastMessages: { enabled: false } });
+    expect(memory(disconnect(draft(), { kind: "workingMemory" }, ctx))).toEqual({ workingMemory: { enabled: false } });
+  });
+
+  it("the llm and the instructions cannot be disconnected", () => {
+    const d = draft();
+    expect(disconnect(d, { kind: "llm" }, ctx)).toBe(d);
+    expect(disconnect(d, { kind: "instructions" }, ctx)).toBe(d);
+  });
+
+  it("soul: enabled true seeds a starter once, false keeps the user's words", () => {
+    const d = connect(draft(), { kind: "soul" }, ctx);
+    expect(d.config.soul).toEqual({ enabled: true });
+    expect(d.soulText).toBe(soulStarter("Scout"));
+    expect(connect(draft({}, { soulText: "mine" }), { kind: "soul" }, ctx).soulText).toBe("mine");
+    expect(disconnect(d, { kind: "soul" }, ctx, draft()).soulText).toBe("");
+    const edited = disconnect({ ...d, soulText: "edited" }, { kind: "soul" }, ctx, draft());
+    expect([edited.config.soul, edited.soulText]).toEqual([{ enabled: false }, "edited"]);
+  });
+
+  it("built-in tools add and remove their own name, from the default list", () => {
+    expect(connect(draft(), { kind: "schedule" }, ctx).config.tools).toEqual({ builtin: ["workspace", "schedule"] });
+    expect(disconnect(draft(), { kind: "workspace" }, ctx).config.tools).toEqual({ builtin: [] });
+    const twice = connect(connect(draft(), { kind: "schedule" }, ctx), { kind: "schedule" }, ctx);
+    expect(twice.config.tools).toEqual({ builtin: ["workspace", "schedule"] });
+  });
+
+  it("skills: all is expanded to the agent's own library before one is taken out", () => {
+    expect(disconnect(draft(), { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ enabled: ["pdf", "sql"] });
+    expect(connect(draft({ skills: { enabled: [] } }), { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ enabled: ["web"] });
+    expect(disconnect(draft({ skills: { enabled: ["web"] } }), { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ enabled: [] });
     const all = draft();
-    expect(disconnect(all, { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ inherit: ["pdf", "sql"] });
-    expect(connect(draft({ skills: { inherit: "none" } }), { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ inherit: ["web"] });
-    expect(disconnect(draft({ skills: { inherit: ["web"] } }), { kind: "skill", slug: "web" }, ctx).config.skills).toEqual({ inherit: "none" });
+    expect(connect(all, { kind: "skill", slug: "web" }, ctx)).toBe(all);
   });
 
-  it("soul: shared, own (seeds a starter once), none (the file stays)", () => {
-    const none = draft({ soul: { source: "none" } });
-    expect(connect(none, { kind: "soul" }, ctx).config.soul).toEqual({ source: "shared" });
-    const own = setSoulSource(none, "own", "Scout");
-    expect(own.config.soul).toEqual({ source: "own" });
-    expect(own.soulText).toBe(soulStarter("Scout"));
-    expect(setSoulSource({ ...none, soulText: "my words" }, "own", "Scout").soulText).toBe("my words");
-    const off = disconnect({ ...own, soulText: "edited" }, { kind: "soul" }, ctx, none);
-    expect(off.config.soul).toEqual({ source: "none" });
-    expect(off.soulText).toBe("edited");
-    // an untouched starter leaves with the connection, so a file the user never asked for is not written
-    expect(disconnect(own, { kind: "soul" }, ctx, none).soulText).toBe("");
+  it("MCP: disconnect writes enabled false, connect removes it, delete removes the key", () => {
+    const { draft: d1, ref } = addMcpServer(draft());
+    expect(ref).toEqual({ kind: "mcp", name: "server" });
+    expect(d1.config.tools).toEqual({ mcp: { server: { command: "", args: [] } } });
+    expect(addMcpServer(d1).ref).toEqual({ kind: "mcp", name: "server-2" });
+    const off = disconnect(d1, ref, ctx);
+    expect(off.config.tools).toEqual({ mcp: { server: { command: "", args: [], enabled: false } } });
+    expect(connect(off, ref, ctx).config.tools).toEqual({ mcp: { server: { command: "", args: [] } } });
+    expect(removeMcpServer(d1, "server").config.tools).toBeUndefined();
+    expect(renameMcpServer(d1, "server", "github").config.tools).toEqual({ mcp: { github: { command: "", args: [] } } });
+    expect(renameMcpServer(addMcpServer(d1).draft, "server", "server-2").config).toEqual(addMcpServer(d1).draft.config);
   });
 
-  it("telegram: a specialist gets the conventional token variable; the primary is left alone", () => {
+  it("telegram: enabled true / false only", () => {
     const d = connect(draft(), { kind: "telegram" }, ctx);
-    expect(d.config.telegram).toEqual({ enabled: true, tokenEnv: "TELEGRAM_BOT_TOKEN_SCOUT" });
-    expect(connect(draft({ telegram: { tokenEnv: "MINE" } }), { kind: "telegram" }, ctx).config.telegram).toEqual({ tokenEnv: "MINE", enabled: true });
-    expect(disconnect(d, { kind: "telegram" }, ctx).config.telegram).toEqual({ enabled: false, tokenEnv: "TELEGRAM_BOT_TOKEN_SCOUT" });
-    const primary = draft({ primary: true });
-    expect(disconnect(primary, { kind: "telegram" }, ctx)).toBe(primary);
-  });
-
-  it("private MCP servers: add makes a free name, disconnect deletes the key, the last one removes the map", () => {
-    const { draft: d1, ref } = addPrivateServer(draft(), ctx);
-    expect(ref).toEqual({ kind: "private-mcp", name: "server" });
-    expect(d1.config.tools).toEqual({ mcp: { servers: { server: { command: "", args: [], enabled: true, trusted: false } } } });
-    expect(addPrivateServer(d1, ctx).ref).toEqual({ kind: "private-mcp", name: "server-2" });
-    expect(addPrivateServer(draft({}), { ...ctx, root: { ...root, mcpServers: [{ name: "server", enabled: true, trusted: false }] } }).ref).toEqual({ kind: "private-mcp", name: "server-2" });
-    expect(disconnect(d1, ref, ctx).config.tools).toBeUndefined();
-    expect(renamePrivateServer(d1, "server", "mine", ctx).config.tools).toEqual({ mcp: { servers: { mine: { command: "", args: [], enabled: true, trusted: false } } } });
-    expect(renamePrivateServer(d1, "server", "github", ctx)).not.toBe(d1); // a root name is allowed here; validation flags the clash
+    expect(d.config.telegram).toEqual({ enabled: true });
+    expect(disconnect(d, { kind: "telegram" }, ctx).config.telegram).toEqual({ enabled: false });
   });
 
   it("triggers: add keeps ids unique, disconnect switches off, delete removes the entry", () => {
     const t = { id: "daily", type: "cron" as const, enabled: false, cron: "0 9 * * *", prompt: "hi" };
     const d1 = addTrigger(draft(), t);
     expect(freeTriggerId(d1, "daily")).toBe("daily-2");
-    expect(on(d1, "trigger", "daily")).toBe(false);
+    expect(on(d1, "trigger:daily")).toBe(false);
     const d2 = connect(d1, { kind: "trigger", id: "daily" }, ctx);
-    expect((d2.config.triggers as Array<{ enabled: boolean }>)[0]!.enabled).toBe(true);
-    expect((disconnect(d2, { kind: "trigger", id: "daily" }, ctx).config.triggers as Array<{ enabled: boolean }>)[0]!.enabled).toBe(false);
+    expect(on(d2, "trigger:daily")).toBe(true);
+    expect(on(disconnect(d2, { kind: "trigger", id: "daily" }, ctx), "trigger:daily")).toBe(false);
     expect(removeTrigger(d2, "daily").config.triggers).toBeUndefined();
   });
 });
 
-describe("risk", () => {
-  it("is risky with the workspace tool or a trusted server, and not otherwise", () => {
-    expect(isRisky(draft().config, root)).toBe(true);
-    const quiet = { tools: { builtin: [], mcp: { inherit: ["github"] } } };
-    expect(isRisky(draft(quiet).config, root)).toBe(false);
-    expect(isRisky(draft({ tools: { builtin: [], mcp: { inherit: ["files"] } } }).config, root)).toBe(true);
-    expect(isRisky(draft({ tools: { builtin: [], mcp: { inherit: "all" } } }).config, root)).toBe(true);
-    expect(isRisky(draft({ tools: { builtin: [], mcp: { servers: { x: { command: "x", trusted: true } } } } }).config, root)).toBe(true);
-    expect(isRisky(draft({ tools: { builtin: [], mcp: { servers: { x: { command: "x", trusted: true, enabled: false } } } } }).config, root)).toBe(false);
+describe("models", () => {
+  const two = draft({ models: { main: { id: "anthropic/a" }, cheap: { id: "openai/b" } }, memory: { observational: { enabled: true, model: "cheap" } } });
+
+  it("refuses to remove a model that something uses, or the last one", () => {
+    expect(modelUsers(two.config, "cheap")).toEqual(["the observer of observational memory"]);
+    const r1 = removeModel(two, "cheap");
+    expect("error" in r1 && r1.error).toMatch(/cheap is used as the observer/);
+    const r2 = removeModel(two, "main");
+    expect("error" in r2 && r2.error).toMatch(/the agent's model/);
+    const r3 = removeModel(draft({ models: { main: { id: "a/b" }, x: { id: "c/d" } }, memory: { subconscious: { model: "x" } } }), "x");
+    expect("error" in r3 && r3.error).toMatch(/subconscious/);
+    const free = draft({ models: { main: { id: "a/b" }, spare: { id: "c/d" } } });
+    const r4 = removeModel(free, "spare");
+    expect("draft" in r4 && r4.draft.config.models).toEqual({ main: { id: "a/b" } });
+  });
+
+  it("renames a key and every reference to it", () => {
+    const d = renameModel(two, "cheap", "fast");
+    expect(Object.keys(d.config.models as object)).toEqual(["main", "fast"]);
+    expect((d.config.memory as { observational: { model: string } }).observational.model).toBe("fast");
+    expect(renameModel(two, "main", "cheap")).toBe(two); // taken
+    expect(renameModel(two, "main", "brain").config.model).toBe("brain");
+  });
+});
+
+describe("other rules", () => {
+  it("is risky with the workspace tool or a trusted, enabled MCP server", () => {
+    expect(isRisky(draft().config)).toBe(true);
+    expect(isRisky(draft({ tools: { builtin: [] } }).config)).toBe(false);
+    expect(isRisky(draft({ tools: { builtin: [], mcp: { x: { command: "x", trusted: true } } } }).config)).toBe(true);
+    expect(isRisky(draft({ tools: { builtin: [], mcp: { x: { command: "x", trusted: true, enabled: false } } } }).config)).toBe(false);
+  });
+
+  it("notices when a save would move the agent to another database", () => {
+    expect(storageMoved(draft(), draft())).toBe(false);
+    expect(storageMoved(draft(), draft({ memory: { storage: { url: "libsql://x.turso.io", authTokenEnv: "T" } } }))).toBe(true);
   });
 });
 
@@ -241,32 +240,34 @@ describe("the staged changes", () => {
   it("is empty for an identical draft", () => expect(describeChanges(base, { ...base }, ctx)).toEqual([]));
 
   it("names connections, disconnections and edits, one line each", () => {
-    let d = connect(base, { kind: "semantic" }, ctx);
-    d = disconnect(d, { kind: "recent" }, ctx);
+    let d = connect(base, { kind: "subconscious" }, ctx);
     d = disconnect(d, { kind: "workspace" }, ctx);
-    d = connect(d, { kind: "mcp", name: "github" }, ctx);
-    d = { ...d, config: { ...d.config, model: "smart", name: "Scout 2" }, instructionsText: "changed" };
+    d = addMcpServer(d).draft;
+    d = { ...d, config: { ...d.config, models: { main: { id: "x/y" }, smart: { id: "x/z" } }, model: "smart", name: "Scout 2" }, instructionsText: "changed" };
     d = addTrigger(d, { id: "gh", type: "github-pr", enabled: false, repo: "a/b", tokenEnv: "GITHUB_TOKEN", prompt: "x" });
     d = removeTrigger(d, "daily");
     expect(describeChanges(base, d, ctx).map((c) => c.label).sort()).toEqual(
       [
         "Changed agent settings: name",
         "Changed instructions",
-        "Connected github",
+        "Connected Subconscious",
         "Connected Semantic recall",
-        "Disconnected Recent messages",
+        "Connected Observational memory",
         "Disconnected Workspace",
-        "Model: fast to smart",
+        "Model: main to smart",
+        'Added MCP server "server"',
         'Added trigger "gh"',
         'Deleted trigger "daily"',
       ].sort(),
     );
   });
 
-  it("counts a text-only edit and an own-soul edit", () => {
+  it("counts text-only, settings-only and selection-only edits", () => {
     expect(describeChanges(base, { ...base, soulText: "hello" }, ctx).map((c) => c.label)).toEqual(["Changed soul"]);
-    const d = addPrivateServer(base, ctx).draft;
-    expect(describeChanges(base, d, ctx).map((c) => c.label)).toEqual(['Added MCP server "server"']);
+    expect(describeChanges(base, draft({ ...base.config, sandbox: { allowNetwork: false } }), ctx).map((c) => c.label)).toEqual(["Changed sandbox"]);
+    expect(describeChanges(base, draft({ ...base.config, memory: { lastMessages: { count: 5 } } }), ctx).map((c) => c.label)).toEqual(["Changed last messages"]);
+    expect(describeChanges(base, draft({ ...base.config, skills: { enabled: ["pdf", "web", "sql"] } }), ctx).map((c) => c.label)).toEqual(["Changed skill selection"]);
+    expect(describeChanges(base, draft({ ...base.config, models: { main: { id: "anthropic/other" } } }), ctx).map((c) => c.label)).toEqual(["Changed models"]);
   });
 
   it("falls back to one line for hand edits outside the components", () => {
@@ -275,31 +276,54 @@ describe("the staged changes", () => {
 });
 
 describe("problems land on the node they belong to", () => {
-  it("routes validation paths to nodes", () => {
+  it("routes validation paths to nodes, by trigger index or id", () => {
     const config = { triggers: [{ id: "a" }, { id: "b" }] };
-    const by = issuesByNode(
-      {
-        model: '"x" is not a root model',
-        "instructions.file": "must be a .md file",
-        "memory.lastMessages": "too small",
-        "tools.mcp.inherit": '"gone" is not a root MCP server',
-        "tools.mcp.servers.mine.command": "command is required",
-        "telegram.tokenEnv": "name the variable",
-        "triggers.1.cron": "five fields",
-        name: "required",
-        "delegation.acceptsFrom": "bad",
-      },
-      config,
-    );
-    expect(by).toEqual({
-      model: ['"x" is not a root model'],
-      instructions: ["must be a .md file"],
-      recent: ["too small"],
-      "mcp:gone": ['"gone" is not a root MCP server'],
-      "private-mcp:mine": ["command is required"],
-      telegram: ["name the variable"],
+    expect(
+      issuesByNode(
+        {
+          model: "must name an entry in models",
+          "models.main.id": 'use "provider/model"',
+          "memory.storage.authTokenEnv": "needs a token",
+          "memory.subconscious.enabled": "needs both",
+          "memory.observational.model": "must name an entry in models",
+          "instructions.file": "bad",
+          "sandbox.commandTimeoutMs": "too small",
+          "tools.mcp.gh.url": "bad url",
+          "telegram.allowedUserIds": "add one",
+          "triggers.1.cron": "five fields",
+          "triggers.a.timezone": "not a zone",
+          name: "required",
+        },
+        config,
+      ),
+    ).toEqual({
+      llm: ["must name an entry in models", 'use "provider/model"'],
+      storage: ["needs a token"],
+      subconscious: ["needs both"],
+      observational: ["must name an entry in models"],
+      instructions: ["bad"],
+      workspace: ["too small"],
+      "mcp:gh": ["bad url"],
+      telegram: ["add one"],
       "trigger:b": ["five fields"],
-      agent: ["required", "bad"],
+      "trigger:a": ["not a zone"],
+      agent: ["required"],
     });
+  });
+
+  it("routes the engine's sentences, including a missing key used in two places", () => {
+    const by = problemsByNode(
+      [
+        "ANTHROPIC_API_KEY is not set in this agent's keys (models.main, memory.semanticRecall.embedder)",
+        "LIBSQL_AUTH_TOKEN is not set in this agent's keys (memory.storage)",
+        "telegram: add at least one allowed user id; without one the bot would answer anyone",
+        "memory.storage.url is already used by \"other\"; agents never share storage",
+        "something nobody can place",
+      ],
+      {},
+    );
+    expect(Object.keys(by).sort()).toEqual(["agent", "llm", "semanticRecall", "storage", "telegram"]);
+    expect(by.llm).toEqual(by.semanticRecall);
+    expect(by.storage).toHaveLength(2);
   });
 });

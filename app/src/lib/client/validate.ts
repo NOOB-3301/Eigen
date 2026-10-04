@@ -1,19 +1,33 @@
-import { AgentConfigSchema, TRIGGER_PLACEHOLDERS, type AgentConfig } from "@eigen/engine/schema";
-import type { RootInfo } from "@/lib/types";
+import { AgentConfigSchema, TRIGGER_PLACEHOLDERS, agentProblems, type AgentConfig } from "@eigen/engine/schema";
+
+/*
+ * The studio's own check of an agent draft, run in the browser on every keystroke so Apply is blocked with readable messages before the
+ * server refuses. Same rules as the server: AgentConfigSchema, then agentProblems. Pure (no `@/` imports) so it is tested directly.
+ */
 
 export type Validation = { ok: boolean; issues: string[]; byPath: Record<string, string> };
 
-const validTimezone = (zone: string) => {
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: zone });
-    return true;
-  } catch {
-    return false;
-  }
-};
+/** zod's wording for the common cases, in the words a form uses. */
+function humanize(message: string): string {
+  if (/^Too small: expected string to have >=1 characters?$/.test(message)) return "required";
+  if (/^Invalid input: expected \w+, received undefined$/.test(message)) return "required";
+  if (/^Too small: expected number to be >0$/.test(message)) return "must be a positive whole number";
+  if (/^Invalid input: expected int, received number$/.test(message)) return "must be a whole number";
+  return message;
+}
 
-/** Same checks as the store's validateAgent (schema + references), run in the browser on every keystroke. */
-export function validateDraft(id: string, config: unknown, root?: RootInfo): Validation {
+/** agentProblems speaks of triggers by id and of the bot as a whole; the forms key their fields by index and by field. */
+function problemPath(config: AgentConfig, path: string): string {
+  if (path === "telegram") return "telegram.allowedUserIds";
+  const m = /^triggers\.([^.]+)\.(.+)$/.exec(path);
+  if (m) {
+    const i = config.triggers.findIndex((t) => t.id === m[1]);
+    if (i >= 0) return `triggers.${i}.${m[2]}`;
+  }
+  return path;
+}
+
+export function validateDraft(id: string, config: unknown): Validation {
   const byPath: Record<string, string> = {};
   const issues: string[] = [];
   const add = (path: string, msg: string) => {
@@ -22,31 +36,15 @@ export function validateDraft(id: string, config: unknown, root?: RootInfo): Val
   };
   const r = AgentConfigSchema.safeParse(config);
   if (!r.success) {
-    // zod words an empty required string as "Too small: expected string to have >=1 characters"; say what is wrong instead.
-    for (const i of r.error.issues) add(i.path.join("."), /^Too small: expected string to have >=1 characters?$/.test(i.message) ? "required" : i.message);
+    for (const i of r.error.issues) add(i.path.join("."), humanize(i.message));
     return { ok: false, issues, byPath };
   }
   const a = r.data;
   if (a.id !== id) add("id", `must equal the folder name "${id}"`);
-  const tg = a.telegram;
-  if (tg.enabled && !a.primary && !tg.tokenEnv) add("telegram.tokenEnv", "name the .env variable that holds this bot's token");
-  if (tg.enabled && !a.primary) {
-    const ids = tg.allowedUserIds ?? root?.telegram?.allowedUserIds;
-    if (ids && ids.length === 0) add("telegram.allowedUserIds", tg.allowedUserIds ? "add at least one Telegram user id, or reset to inherit the root list" : "the root list is empty: add user ids in Settings, or override them here");
-  }
-  // Same check as agentProblems: an unknown zone would make the cron trigger fail at load time.
-  a.triggers.forEach((t, i) => {
-    if (t.type === "cron" && t.timezone && !validTimezone(t.timezone)) add(`triggers.${i}.timezone`, `"${t.timezone}" is not a time zone`);
-  });
-  if (root) {
-    const models = new Set(root.models.map((m) => m.key));
-    const servers = new Set(root.mcpServers.map((s) => s.name));
-    if (a.model && !models.has(a.model)) add("model", `"${a.model}" is not a root model`);
-    const inherit = a.tools.mcp.inherit;
-    if (Array.isArray(inherit)) inherit.filter((n) => !servers.has(n)).forEach((n) => add("tools.mcp.inherit", `"${n}" is not a root MCP server`));
-    Object.keys(a.tools.mcp.servers)
-      .filter((n) => servers.has(n))
-      .forEach((n) => add(`tools.mcp.servers.${n}`, "shadows a root MCP server; rename it"));
+  for (const p of agentProblems(a)) {
+    const m = /^([\w.-]+): (.*)$/.exec(p);
+    if (m) add(problemPath(a, m[1]!), m[2]!);
+    else add("", p);
   }
   return { ok: issues.length === 0, issues, byPath };
 }
@@ -58,16 +56,15 @@ export function validateDraft(id: string, config: unknown, root?: RootInfo): Val
 export function warnings(config: unknown): string[] {
   const r = AgentConfigSchema.safeParse(config);
   if (!r.success) return [];
-  const a: AgentConfig = r.data;
+  const a = r.data;
   const out: string[] = [];
-  if (Array.isArray(a.skills.inherit) && a.skills.inherit.length && !a.tools.builtin.includes("workspace"))
-    out.push("skills.inherit: skills load through the workspace tool; turn it on or this agent cannot use them");
-  const botOff = a.telegram.enabled === false || (a.telegram.enabled === undefined && !a.primary);
+  const someSkills = a.skills.enabled === "all" || a.skills.enabled.length > 0;
+  if (someSkills && !a.tools.builtin.includes("workspace")) out.push("skills.enabled: skills load through the workspace tool; connect it or this agent cannot use them");
   a.triggers.forEach((t, i) => {
     const known = new Set<string>(TRIGGER_PLACEHOLDERS[t.type]);
     const unknown = [...t.prompt.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]!).filter((n) => !known.has(n));
     if (unknown.length) out.push(`triggers.${i}.prompt: {{${unknown[0]}}} is not filled in for a ${t.type} trigger (use ${[...known].map((n) => `{{${n}}}`).join(", ")})`);
-    if (t.enabled && t.deliverToTelegram && botOff) out.push(`triggers.${i}.deliverToTelegram: this agent has no Telegram bot, so replies stay in the run log`);
+    if (t.enabled && t.deliverToTelegram && !a.telegram.enabled) out.push(`triggers.${i}.deliverToTelegram: this agent has no Telegram bot, so replies stay in the run log`);
   });
   return out;
 }
@@ -76,7 +73,7 @@ export function warnings(config: unknown): string[] {
 export function issuesByPath(issues: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const i of issues) {
-    const m = /^([\w.]+): (.*)$/.exec(i);
+    const m = /^([\w.-]+): (.*)$/.exec(i);
     if (m) out[m[1]!] ??= m[2]!;
   }
   return out;

@@ -2,13 +2,11 @@
 import type { TelegramRuntime } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 
-export { suggestTokenEnv } from "@/lib/client/telegram";
-
 export type TgTone = "polling" | "starting" | "missing" | "error" | "off" | "unknown";
 export type TgView = { tone: TgTone; label: string; detail?: string };
 
 /**
- * One reading of a bot's state for every place that shows it (canvas node, inspector chip, agent list).
+ * One reading of a bot's state for every place that shows it (builder node, panel chip, agent list).
  * `enabled` is what the config says; `runtime` is what the engine reports. With the engine offline (or silent) only the config is known.
  */
 export function telegramView(runtime: TelegramRuntime | undefined, o: { enabled: boolean; engineOffline?: boolean }): TgView {
@@ -21,7 +19,7 @@ export function telegramView(runtime: TelegramRuntime | undefined, o: { enabled:
     case "starting":
       return { tone: "starting", label: "Starting…", detail: "Connecting to Telegram." };
     case "missing-token":
-      return { tone: "missing", label: "Token missing", detail: "The token variable is not set in ~/.eigen/.env." };
+      return { tone: "missing", label: "Token missing", detail: "The token variable is not set in this agent's .env." };
     case "error":
       return { tone: "error", label: "Error", detail: runtime.error ?? "Telegram rejected the bot." };
     case "off":

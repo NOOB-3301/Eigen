@@ -1,10 +1,10 @@
 "use client";
 import { useId, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { inputCls } from "@/components/inspector/fields";
+import { inputCls } from "@/components/builder/panels/fields";
 import { countLines } from "./format";
 
-/** The engine refuses more than this for a soul or a SKILL.md (WriteSharedSoulRequest, WriteSkillRequest). */
+/** The engine refuses more than this for a soul or a SKILL.md (UpdateAgentConfigRequest.soulText, WriteSkillRequest). */
 export const MAX_TEXT = 100_000;
 
 /**

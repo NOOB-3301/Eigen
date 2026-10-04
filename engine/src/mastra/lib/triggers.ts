@@ -19,7 +19,7 @@ import { isEqual, truncate } from "lodash-es";
 import { TRIGGER_THREAD_PREFIX } from "./memory.ts";
 import { valueFingerprint } from "./envfile.ts";
 import { githubBase, listPulls, type GithubPull } from "./github.ts";
-import type { HomePaths } from "./home.ts";
+import { agentPaths, type HomePaths } from "./home.ts";
 import { scrub } from "./probes.ts";
 import type { ResolvedAgent, RunTriggerResponse, Trigger, TriggerRun, TriggerRuntime } from "./schema.ts";
 import type { TelegramBot } from "./telegram.ts";
@@ -79,24 +79,28 @@ export function chunkText(text: string, size = TELEGRAM_CHUNK): string[] {
   return [...out, rest].filter((c) => c.trim());
 }
 
-/** Where a run's conversation is kept: the user's own resource when the agent shares memory (it sees their profile), else a private one. */
-export const triggerResource = (r: Pick<ResolvedAgent, "id" | "memory" | "telegram">) =>
-  r.memory.scope === "shared" && r.telegram.allowedUserIds[0] !== undefined ? `telegram:${r.telegram.allowedUserIds[0]}` : `agent-${r.id}`;
+/**
+ * The person an agent works for, as its memory knows them: the resource Mastra's Telegram channel gives its first allowed user, so working memory
+ * is the same person in Telegram, the studio chat and trigger runs. Each agent has its own storage, so this never reaches another agent's memory.
+ */
+export const userResource = (r: Pick<ResolvedAgent, "telegram">) => {
+  const user = r.telegram.allowedUserIds[0];
+  return user === undefined ? "studio" : `telegram:${user}`;
+};
 
 export type TriggerDeps = {
-  paths: HomePaths;
-  env?: NodeJS.ProcessEnv;
+  paths: Pick<HomePaths, "agentsDir">;
+  /** The agent's .env as its running version read it. The GitHub token, and the values scrubbed out of what a run says, come from here only. */
+  envOf: (agentId: string) => ReadonlyMap<string, string>;
+  /** GitHub's API base (GITHUB_API_BASE_URL, for tests and GitHub Enterprise). Not a secret, so it may come from the engine's environment. */
+  githubApi?: string;
   clock?: Clock;
   fetchFn?: typeof fetch;
   log?: (msg: string) => void;
   /** Called whenever a trigger's runtime changes (state, next time, last run). */
   emit?: (agentId: string, trigger: TriggerRuntime) => void;
-  /** The root time zone, for a cron trigger that names none. Read at every scheduling, so a change to config.json applies at the next run. */
-  timezone: () => string;
   agentOf: (agentId: string) => Agent | undefined;
   botOf: (agentId: string) => Pick<TelegramBot, "adapter" | "state"> | undefined;
-  /** Env values this agent holds (model key, bot token, ...): scrubbed out of everything a run says. */
-  secretsOf?: (agentId: string) => string[];
   runAgent?: TriggerAgentRun;
   /** How long one run may take. Tests shorten it. */
   runTimeoutMs?: number;
@@ -106,13 +110,13 @@ type Entry = { resolved: ResolvedAgent; handles: Map<string, Handle> };
 type Handle = { def: Trigger; runtime(): TriggerRuntime; stop(): void; refresh(): void; runNow(): Promise<RunTriggerResponse> };
 
 export function createTriggerManager(deps: TriggerDeps) {
-  const { paths, env = process.env, clock = realClock, fetchFn = fetch, log = () => undefined, emit = () => undefined, runAgent = generateUnattended, runTimeoutMs = RUN_TIMEOUT_MS } = deps;
+  const { paths, envOf, githubApi = githubBase(), clock = realClock, fetchFn = fetch, log = () => undefined, emit = () => undefined, runAgent = generateUnattended, runTimeoutMs = RUN_TIMEOUT_MS } = deps;
   const entries = new Map<string, Entry>();
   const histories = new Map<string, RunHistory>();
   const inflight = new Map<string, Map<string, TriggerRun>>();
   const pending = new Set<Promise<unknown>>();
 
-  const historyOf = (agentId: string) => histories.get(agentId) ?? histories.set(agentId, runHistory(runsFile(paths, agentId))).get(agentId)!;
+  const historyOf = (agentId: string) => histories.get(agentId) ?? histories.set(agentId, runHistory(runsFile(agentPaths(paths, agentId)))).get(agentId)!;
   /** Keeps a background job where close() can wait for it. */
   const track = (job: Promise<unknown>) => {
     const done = job.catch(() => undefined).finally(() => pending.delete(done));
@@ -134,7 +138,10 @@ export function createTriggerManager(deps: TriggerDeps) {
     let polledFp: string | undefined;
     let backoffUntil = 0;
 
-    const secrets = () => [...(def.type === "github-pr" ? [env[def.tokenEnv]] : []), ...(deps.secretsOf?.(agentId) ?? [])].filter((s): s is string => !!s);
+    const env = () => envOf(agentId);
+    /** Every value in the agent's .env: a run may quote any of them (a tool dumping its environment), and none may leave in a reply, log or event. */
+    const secrets = () => [...env().values()].filter((s) => !!s);
+    const zone = () => (def.type === "cron" && def.timezone) || entry.resolved.timezone;
     const warn = (msg: string) => log(`trigger ${agentId}/${def.id}: ${scrubText(msg, secrets())}`);
     const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -200,7 +207,7 @@ export function createTriggerManager(deps: TriggerDeps) {
       const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(runTimeoutMs)]);
       // generate may ignore the signal while a model call hangs; the run must still end.
       const gone = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error(abort.signal.aborted ? "interrupted: the agent was reloaded or stopped" : `timed out after ${runTimeoutMs >= 60_000 ? `${runTimeoutMs / 60_000} minutes` : `${runTimeoutMs / 1000} seconds`}`)), { once: true }));
-      const job = runAgent({ agent, prompt: buildPrompt(def.prompt, event), threadId: `${TRIGGER_THREAD_PREFIX}${agentId}-${def.id}`, resourceId: triggerResource(entry.resolved), maxSteps: entry.resolved.maxSteps, signal });
+      const job = runAgent({ agent, prompt: buildPrompt(def.prompt, event), threadId: `${TRIGGER_THREAD_PREFIX}${agentId}-${def.id}`, resourceId: userResource(entry.resolved), maxSteps: entry.resolved.maxSteps, signal });
       void job.catch(() => undefined); // the loser of the race must not become an unhandled rejection
       const out = await Promise.race([job, gone]);
       const note = out.declined.length ? `\n\n(Not done: ${out.declined.length} tool call${out.declined.length > 1 ? "s" : ""} (${[...new Set(out.declined)].join(", ")}) needed approval, and nobody can give it during a trigger run.)` : "";
@@ -247,19 +254,19 @@ export function createTriggerManager(deps: TriggerDeps) {
 
     function scheduleCron(from = clock.now()) {
       if (def.type !== "cron") return;
-      const zone = def.timezone ?? deps.timezone();
+      const tz = zone();
       let due: Date | null;
       try {
-        due = new Cron(def.cron, { timezone: zone, mode: "5-part" }).nextRun(new Date(from));
+        due = new Cron(def.cron, { timezone: tz, mode: "5-part" }).nextRun(new Date(from));
       } catch (e) {
-        return unschedulable(`cannot schedule "${def.cron}" in ${zone}: ${(e as Error).message}`);
+        return unschedulable(`cannot schedule "${def.cron}" in ${tz}: ${(e as Error).message}`);
       }
       if (!due) return unschedulable(`"${def.cron}" never fires`);
-      // A zone or expression that works again (root timezone fixed) clears the error that said it did not.
+      // A zone or expression that works again (the agent's timezone fixed) clears the error that said it did not.
       if (unschedulableNow) setRt({ state: "idle", error: undefined });
       unschedulableNow = false;
       setRt({ nextRunAt: due.toISOString() });
-      arm(due.getTime(), () => track(fireCron(due.getTime(), zone).catch((e) => warn(`run failed: ${(e as Error).message}`))));
+      arm(due.getTime(), () => track(fireCron(due.getTime(), tz).catch((e) => warn(`run failed: ${(e as Error).message}`))));
     }
 
     async function fireCron(dueMs: number, zone: string) {
@@ -301,15 +308,15 @@ export function createTriggerManager(deps: TriggerDeps) {
     /** One poll; resolves to how long to wait before the next one. */
     async function pollOnce(): Promise<number> {
       if (def.type !== "github-pr") return 0;
-      const token = env[def.tokenEnv];
+      const token = env().get(def.tokenEnv);
       polledFp = valueFingerprint(token);
-      if (!token) return setRt({ state: "missing-token", error: `${def.tokenEnv} is not set in .env` }), intervalMs();
-      const res = await listPulls({ base: githubBase(env), repo: def.repo, token, etag: etag?.fp === polledFp ? etag.value : undefined, fetchFn, signal: abort.signal, now: () => clock.now() });
+      if (!token) return setRt({ state: "missing-token", error: `${def.tokenEnv} is not set in this agent's keys` }), intervalMs();
+      const res = await listPulls({ base: githubApi, repo: def.repo, token, etag: etag?.fp === polledFp ? etag.value : undefined, fetchFn, signal: abort.signal, now: () => clock.now() });
       if (stopped) return 0;
       if (res.kind === "error") return setRt({ state: "error", error: res.message }), intervalMs();
       if (res.kind === "rate-limited") {
         backoffUntil = res.resetAt;
-        setRt({ state: "error", error: `GitHub's rate limit is used up; polling resumes at ${dayjs(res.resetAt).tz(deps.timezone()).format("HH:mm")}` });
+        setRt({ state: "error", error: `GitHub's rate limit is used up; polling resumes at ${dayjs(res.resetAt).tz(entry.resolved.timezone).format("HH:mm")}` });
         return Math.max(res.resetAt - clock.now(), intervalMs());
       }
       backoffUntil = 0;
@@ -317,7 +324,7 @@ export function createTriggerManager(deps: TriggerDeps) {
 
       if (res.dropped) warn(`${res.dropped} pull request(s) in the answer were not understood and were ignored`);
       etag = res.etag ? { fp: polledFp, value: res.etag } : undefined;
-      const file = seenFile(paths, agentId, def.id);
+      const file = seenFile(agentPaths(paths, agentId), def.id);
       const before = (seen ??= loadSeen(file, def.repo));
       // Drafts are neither fired nor remembered: a draft that is later marked ready is a pull request opening for review, so it fires then.
       const open = res.pulls.filter((p) => def.includeDrafts || !p.draft);
@@ -345,9 +352,9 @@ export function createTriggerManager(deps: TriggerDeps) {
     /** The newest open pull request, for "run now". Does not touch the seen-list or the ETag. */
     async function latestPull(): Promise<{ pull: GithubPull } | { error: string }> {
       if (def.type !== "github-pr") return { error: "not a github-pr trigger" };
-      const token = env[def.tokenEnv];
-      if (!token) return { error: `${def.tokenEnv} is not set in .env` };
-      const res = await listPulls({ base: githubBase(env), repo: def.repo, token, fetchFn, signal: abort.signal, now: () => clock.now() });
+      const token = env().get(def.tokenEnv);
+      if (!token) return { error: `${def.tokenEnv} is not set in this agent's keys` };
+      const res = await listPulls({ base: githubApi, repo: def.repo, token, fetchFn, signal: abort.signal, now: () => clock.now() });
       if (res.kind === "error") return { error: res.message };
       if (res.kind === "rate-limited") return { error: "GitHub's rate limit is used up for this token; try again later" };
       if (res.kind === "not-modified" || !res.pulls[0]) return { error: "no open pull requests" };
@@ -370,16 +377,16 @@ export function createTriggerManager(deps: TriggerDeps) {
         clock.clearTimeout(timer);
         abort.abort();
       },
-      /** The agent was reloaded without this trigger changing: re-read the clock zone, and look at GitHub again if the token changed. */
+      /** The agent was reloaded without this trigger changing: re-read its time zone, and look at GitHub again if the token changed. */
       refresh() {
         if (!def.enabled || busy || stopped) return;
         if (def.type === "cron") scheduleCron();
-        else if (valueFingerprint(env[def.tokenEnv]) !== polledFp && clock.now() >= backoffUntil) schedulePoll(0);
+        else if (valueFingerprint(env().get(def.tokenEnv)) !== polledFp && clock.now() >= backoffUntil) schedulePoll(0);
       },
       async runNow() {
         const result = await exclusive(async () => {
           let event: TriggerEvent;
-          if (def.type === "cron") event = { type: "cron", schedule: def.cron, at: clock.now(), zone: def.timezone ?? deps.timezone(), manual: true };
+          if (def.type === "cron") event = { type: "cron", schedule: def.cron, at: clock.now(), zone: zone(), manual: true };
           else {
             const found = await latestPull();
             if ("error" in found) return { ok: false, error: found.error } satisfies RunTriggerResponse;

@@ -1,16 +1,19 @@
+/**
+ * One agent's system prompt, re-read from its folder on every turn so edits apply to the next message with no reload. Everything comes from
+ * that agent's own folder: its role (instructions.inline or instructions.file), its soul, its ground rules and skill notes in its sandbox.
+ */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { compact, truncate } from "lodash-es";
-import type { HomePaths } from "./home.ts";
+import type { AgentPaths } from "./home.ts";
+import type { ResolvedAgent } from "./schema.ts";
 import { reportFile } from "./skills.ts";
+import { readAgentMd, soulText } from "./soul.ts";
 import { clockLine } from "./time.ts";
 
-export const MEMORY_FILES = ["MEMORY.md", "profile.md", "projects.md", "people.md", "lessons.md"];
-const MEMORY_MAX_CHARS = 24_000;
 const SECRETS_RULE = [
   "API keys and tokens for skills go in .env in your working directory (the sandbox root), one NAME=value per line. Skills read them as environment variables, so the next command sees a new key with no restart.",
   "To add one: run `printf '\\n%s=%s\\n' NAME 'value' >> .env` (the leading newline stops it joining the previous line), or use the write tool with every variable on its own line, ending in a newline. To change one, edit its line; do not append a duplicate.",
-  "Never put a key in working memory, memory files, notes or scripts, and never repeat one back to the user: say only its name. In scripts, read it from the environment.",
+  "Never put a key in working memory, notes or scripts, and never repeat one back to the user: say only its name. In scripts, read it from the environment.",
 ].join("\n");
 const MEMORY_RULE = [
   "Working memory holds small, stable facts about the user. Before updating it, read the current <working_memory_data> block and change only what changed: keep every other section and line as it is. Never rebuild it from scratch and never replace content with a placeholder such as \"unchanged\" or \"other rules\".",
@@ -26,7 +29,6 @@ const FINISH_RULE = [
   "Keep calling tools until every question in the message is answered and every task you were given is complete. If there are several items (notifications, comments, files, steps), work through all of them, one after another, before you reply. A text-only reply ends your turn, so send one only when the work is done or you are blocked and need the user.",
   "In your final reply, say what you did and what the results were. If something could not be done, say exactly what failed and why.",
 ].join("\n");
-const FALLBACK = "You are eigen, a personal assistant. Be concise.";
 
 export const readText = (file: string) => {
   try {
@@ -38,28 +40,29 @@ export const readText = (file: string) => {
 
 const tag = (name: string, body: string) => (body ? `<${name}>\n${body}\n</${name}>` : "");
 
-export const memoryBlock = (memoryDir: string) =>
-  truncate(
-    compact(MEMORY_FILES.map((name) => ((text) => text && `## ${name}\n${text}`)(readText(join(memoryDir, name))))).join("\n\n"),
-    { length: MEMORY_MAX_CHARS, omission: "\n[memory truncated]" },
-  );
+/** The role prompt: `instructions.inline` when set, else the agent's instructions file (confined to its folder). */
+export function roleText(r: Pick<ResolvedAgent, "instructions">, agentDir: string): string {
+  if (r.instructions.inline !== undefined) return r.instructions.inline.trim();
+  const read = readAgentMd(agentDir, r.instructions.file);
+  return "text" in read ? read.text : "";
+}
 
-/**
- * What the primary's .agents/<id>/config.json settings resolve to. Omitted: prompts/system.md, the shared SOUL.md, and memory.
- * `soul` is the persona text itself (lib/soul.ts reads it for the agent's soul source); "" leaves the block out.
- */
-export type PrimaryPrompt = { text?: string; soul?: string; memory?: boolean };
+type PromptAgent = Pick<ResolvedAgent, "name" | "instructions" | "soul" | "timezone" | "tools" | "memory">;
+type PromptPaths = Pick<AgentPaths, "dir" | "groundRulesFile" | "sandboxQuarantineDir">;
 
-/** Re-read from disk on every turn, so edits apply to the next message. The clock goes last to keep the cacheable prefix stable. */
-export const buildInstructions = (p: HomePaths, zone: string, at?: Date, { text, soul = readText(p.soulFile), memory = true }: PrimaryPrompt = {}) =>
-  compact([
-    tag("operating_instructions", (text ?? readText(p.systemPromptFile)) || FALLBACK),
-    tag("soul", soul),
-    tag("ground_rules", `${GROUND_RULES_INTRO}\n\n${truncate(readText(p.groundRulesFile), { length: GROUND_RULES_MAX_CHARS, omission: "\n[rules truncated]" }) || "(none yet)"}`),
-    memory && tag("memory", memoryBlock(p.memoryDir)),
-    tag("skill_notes", readText(reportFile(p))),
-    tag("secrets", SECRETS_RULE),
-    tag("memory_rules", MEMORY_RULE),
+/** The whole system prompt for this turn. The clock goes last to keep the cacheable prefix stable. */
+export function buildInstructions(r: PromptAgent, p: PromptPaths, at?: Date): string {
+  const workspace = r.tools.builtin.includes("workspace");
+  const groundRules = truncate(readText(p.groundRulesFile), { length: GROUND_RULES_MAX_CHARS, omission: "\n[rules truncated]" });
+  return compact([
+    tag("operating_instructions", roleText(r, p.dir) || `You are ${r.name}. Be concise.`),
+    tag("soul", soulText(r.soul, p.dir)),
+    // The agent keeps its ground rules in its sandbox, so they exist only with the workspace tool (or when it had one before).
+    (workspace || groundRules) && tag("ground_rules", `${GROUND_RULES_INTRO}\n\n${groundRules || "(none yet)"}`),
+    workspace && tag("skill_notes", readText(reportFile(p))),
+    workspace && tag("secrets", SECRETS_RULE),
+    r.memory.storage.enabled && r.memory.workingMemory.enabled && tag("memory_rules", MEMORY_RULE),
     tag("finishing", FINISH_RULE),
-    clockLine(zone, at),
+    clockLine(r.timezone, at),
   ]).join("\n\n");
+}

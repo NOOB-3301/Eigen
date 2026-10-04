@@ -4,8 +4,8 @@ import { CalendarClock, CircleCheck, CircleX, GitPullRequest, LoaderCircle, Tras
 import { ENV_NAME, TRIGGER_PLACEHOLDERS, TriggerSchema, type GithubCheckResponse, type Trigger, type TriggerInput } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Button, Switch } from "@/components/ui";
-import { ChipToggle, SwitchRow, inputCls } from "@/components/inspector/fields";
-import { Callout } from "@/components/settings/controls";
+import { ChipToggle, SwitchRow, inputCls } from "@/components/builder/panels/fields";
+import { Callout } from "@/components/builder/panels/controls";
 import { SecretInput } from "@/components/secret-input";
 import { CRON_PRESETS, checkCron, isTimezone } from "./cron";
 import { FormField } from "./form-field";
@@ -61,17 +61,19 @@ const zoneList = () => (zones ??= typeof Intl.supportedValuesOf === "function" ?
 const useZones = () => useSyncExternalStore(noSubscribe, zoneList, () => EMPTY);
 
 export type TriggerFormViewProps = {
+  /** The agent whose config holds the trigger: the GitHub token is written to its .env. */
+  agentId: string;
   value: TriggerInput | Trigger;
   onChange: (next: TriggerInput) => void;
   onRemove?: () => void;
   telegramOn: boolean;
   risky: boolean;
-  /** github-pr: whether the token's variable has a value in ~/.eigen/.env. */
+  /** github-pr: whether the token's variable has a value in the agent's .env. */
   tokenSet: boolean;
   onCheckGithub: (tokenEnv: string, repo: string) => Promise<GithubCheckResponse>;
 };
 
-export function TriggerFormView({ value, onChange, onRemove, telegramOn, risky, tokenSet, onCheckGithub }: TriggerFormViewProps) {
+export function TriggerFormView({ agentId, value, onChange, onRemove, telegramOn, risky, tokenSet, onCheckGithub }: TriggerFormViewProps) {
   const errors = schemaErrors(value);
   const deliver = value.deliverToTelegram ?? true;
   const github = value.type === "github-pr";
@@ -110,7 +112,7 @@ export function TriggerFormView({ value, onChange, onRemove, telegramOn, risky, 
       {value.type === "cron" ? (
         <CronFields value={value} errors={errors} patch={(p) => onChange({ ...value, ...p })} />
       ) : (
-        <GithubFields value={value} errors={errors} patch={(p) => onChange({ ...value, ...p })} tokenSet={tokenSet} onCheck={onCheckGithub} />
+        <GithubFields agentId={agentId} value={value} errors={errors} patch={(p) => onChange({ ...value, ...p })} tokenSet={tokenSet} onCheck={onCheckGithub} />
       )}
 
       <PromptField value={value} error={errors.prompt} onChange={(prompt) => onChange({ ...value, prompt })} />
@@ -201,12 +203,14 @@ function CronFields({ value, errors, patch }: { value: CronValue; errors: Record
 const EVENT_LABEL = { opened: ["Opened", "A pull request the poller has not seen before."], updated: ["Updated", "A pull request already seen whose head commit changed."] } as const;
 
 function GithubFields({
+  agentId,
   value,
   errors,
   patch,
   tokenSet,
   onCheck,
 }: {
+  agentId: string;
   value: GithubValue;
   errors: Record<string, string>;
   patch: (p: Partial<GithubValue>) => void;
@@ -224,10 +228,10 @@ function GithubFields({
       </FormField>
 
       <div className="space-y-2">
-        <FormField label="Token variable" error={errors.tokenEnv ? "Upper-case name such as GITHUB_TOKEN" : undefined} hint="The name of the line in ~/.eigen/.env that holds a GitHub token. It needs read access to the repository's pull requests.">
+        <FormField label="Token variable" error={errors.tokenEnv ? "Upper-case name such as GITHUB_TOKEN" : undefined} hint="The name of the line in this agent's .env that holds a GitHub token. It needs read access to the repository's pull requests.">
           {(a) => <input id={a.id} aria-describedby={a.describedBy} aria-invalid={a.invalid} value={value.tokenEnv} placeholder="GITHUB_TOKEN" spellCheck={false} autoCapitalize="characters" onChange={(e) => patch({ tokenEnv: e.target.value.toUpperCase().replace(/\s+/g, "") })} className={cn(inputCls(a.invalid), "max-w-xs font-mono text-[13px]")} />}
         </FormField>
-        {tokenValid && <SecretInput name={value.tokenEnv} set={tokenSet} label="GitHub token" />}
+        {tokenValid && <SecretInput agentId={agentId} name={value.tokenEnv} set={tokenSet} label="GitHub token" />}
         <GithubCheck key={`${value.tokenEnv}|${value.repo}`} ready={tokenValid && !errors.repo && tokenSet} reason={!tokenValid ? "Name the token variable first." : errors.repo ? "Enter a valid repository first." : "Set the token first."} onCheck={() => onCheck(value.tokenEnv, value.repo)} />
       </div>
 

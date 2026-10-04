@@ -1,5 +1,7 @@
 import type { z } from "zod";
-import { scrubPaths } from "./home";
+import { AgentId } from "@eigen/engine/schema";
+import { agentExists } from "@eigen/engine/store";
+import { paths, scrubPaths } from "./home";
 import { guardApi, isJson } from "./guard";
 
 /** Re-run the proxy guard inside the handler, so the rules hold even if the proxy matcher ever misses a route. */
@@ -22,8 +24,19 @@ export async function readBody<S extends z.ZodType>(req: Request, schema: S): Pr
   return { data: r.data };
 }
 
-/** Turns unexpected failures (unreadable root config, bad id) into a JSON error without leaking paths. */
+/** Turns unexpected failures (unreadable file, bad id) into a JSON error without leaking paths. */
 export function failure(e: unknown, status = 500) {
   const msg = scrubPaths(e instanceof Error ? e.message : String(e));
   return json({ ok: false, issues: [msg] }, /invalid (agent id|skill slug)/.test(msg) ? 400 : status);
+}
+
+/**
+ * The agent a route is about: 400 for anything that is not an agent id, 404 when there is no such folder. Checked before any file or the
+ * engine is touched, so a request can never create a folder or reach the engine for an agent that does not exist. `error`: the 4xx body
+ * speaks `error` (the probe and trigger DTOs) instead of `issues`.
+ */
+export function agentOr(id: string, as: "issues" | "error" = "issues"): Response | null {
+  const body = (msg: string) => (as === "error" ? { ok: false, error: msg } : { ok: false, issues: [msg] });
+  if (!AgentId.safeParse(id).success) return json(body("id: must be a lowercase slug"), 400);
+  return agentExists(paths(), id) ? null : json(body(`no agent "${id}"`), 404);
 }

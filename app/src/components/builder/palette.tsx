@@ -7,10 +7,10 @@ import { Kbd, spring } from "@/components/ui";
 import { TINT } from "./kinds";
 import type { Group } from "./model";
 
-/** The sections of the palette. They follow the canvas (left, right, top), with the right-hand side split into its three kinds of thing. */
-export type PaletteSection = "think" | "builtin" | "mcp" | "skills" | "reach";
-export const SECTION_TITLE: Record<PaletteSection, string> = { think: "Thinks with", builtin: "Built-in tools", mcp: "MCP servers", skills: "Skills", reach: "Reaches it, wakes it" };
-export const SECTION_GROUP: Record<PaletteSection, Group> = { think: "think", builtin: "tools", mcp: "tools", skills: "tools", reach: "reach" };
+/** The sections of the palette. They follow the canvas (memory chain, prompt, tools, reach), with the tools split into their three kinds of thing. */
+export type PaletteSection = "memory" | "think" | "builtin" | "mcp" | "skills" | "reach";
+export const SECTION_TITLE: Record<PaletteSection, string> = { memory: "Memory", think: "Prompt", builtin: "Built-in tools", mcp: "MCP servers", skills: "Skills", reach: "Reaches it, wakes it" };
+export const SECTION_GROUP: Record<PaletteSection, Group> = { memory: "memory", think: "think", builtin: "tools", mcp: "tools", skills: "tools", reach: "reach" };
 
 export type PaletteEntry = {
   key: string;

@@ -26,8 +26,8 @@ afterEach(async () => {
   await tg?.close();
 });
 
-async function start(token: string) {
-  const bot = createBot({ token, allowedUserIds: [7], apiBaseUrl: tg.url });
+async function start(token: string, retryBaseMs = 20) {
+  const bot = createBot({ token, allowedUserIds: [7], apiBaseUrl: tg.url, retryBaseMs });
   const seen: TelegramRuntime[] = [bot.state()];
   bot.subscribe((t) => seen.push(t));
   bots.push(bot);
@@ -53,6 +53,37 @@ describe("createBot", () => {
     await until(() => bot.state().state === "error");
     expect(bot.state().error).toMatch(/unauthorized/i);
     expect(JSON.stringify(bot.state())).not.toContain("66:revoked");
+    await sleep(300);
+    expect(tg.callsFor("66:revoked", "deleteWebhook")).toHaveLength(1); // waiting does not fix a bad token, so it is not retried
+  });
+
+  it("keeps trying to start while the network is down, and polls as soon as it is back", async () => {
+    tg = await fakeTelegram();
+    tg.drop("99:flaky", "deleteWebhook", 2);
+    const { bot, seen } = await start("99:flaky"); // initialize() only returns once polling has been started
+    await until(() => bot.state().state === "polling");
+    expect(tg.callsFor("99:flaky", "deleteWebhook")).toHaveLength(3);
+    // The studio is told what failed and that the bot is trying again, not just that it is down.
+    expect(seen.filter((s) => s.state === "error").map((s) => s.error)).toContainEqual(expect.stringMatching(/Network error calling Telegram deleteWebhook; trying again in \d+ s/));
+    expect(JSON.stringify(seen)).not.toContain("99:flaky");
+    expect(tg.pollers("99:flaky")).toBe(1);
+  });
+
+  it("stop() ends the retrying at once, and nothing is tried afterwards", async () => {
+    tg = await fakeTelegram();
+    tg.drop("98:down", "deleteWebhook", 1000);
+    // A backoff that would outlast the test. initialize() keeps waiting while it retries, so it is not awaited until the bot is stopped.
+    const bot = createBot({ token: "98:down", allowedUserIds: [7], apiBaseUrl: tg.url, retryBaseMs: 60_000 });
+    bots.push(bot);
+    const initialized = bot.adapter.initialize(fakeChat() as never);
+    await until(() => bot.state().state === "error");
+    const attempts = tg.callsFor("98:down", "deleteWebhook").length;
+    const t0 = Date.now();
+    await bot.stop();
+    await initialized;
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await sleep(300);
+    expect(tg.callsFor("98:down", "deleteWebhook")).toHaveLength(attempts);
   });
 
   it("reports a second poller on the same token as a conflict instead of pretending to be live", async () => {
@@ -96,13 +127,8 @@ describe("createBot", () => {
 });
 
 describe("whose memory a bot's chats belong to", () => {
-  const owner = (isolatedAs?: string) => {
-    const ch = telegramChannels({ adapter: {} as never }, { queue: {} as never, slash: (async () => undefined) as never, verbose: () => false, isolatedAs });
-    return ch.resolveResourceId?.({ defaultResourceId: "telegram:7" } as never);
-  };
-
-  it("keeps Mastra's per-user owner for the primary and shared agents, and gives an isolated agent its own", async () => {
-    expect(await owner()).toBeUndefined(); // no hook: Mastra's default telegram:<userId>
-    expect(await owner("researcher")).toBe("researcher:telegram:7");
+  it("keeps Mastra's per-user owner telegram:<userId>: each agent has its own storage, so nothing needs a prefix", () => {
+    const ch = telegramChannels({ adapter: {} as never }, { queue: {} as never, slash: (async () => undefined) as never, verbose: () => false });
+    expect(ch.resolveResourceId).toBeUndefined();
   });
 });

@@ -4,23 +4,23 @@ import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/mastra/lib/config.ts";
-import type { HomePaths } from "../src/mastra/lib/home.ts";
+import type { AgentPaths } from "../src/mastra/lib/home.ts";
 import { makeWorkspace } from "../src/mastra/lib/tools/workspace.ts";
 import { fakeLlm, type Turn } from "./helpers/fake-llm.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { tmpAgent, type TmpAgent } from "./helpers/agent-folder.ts";
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function setup(turns: Turn[] | ((p: HomePaths) => Turn[]), prepare?: (sandboxDir: string) => void) {
-  const p = tmpHome();
+async function setup(turns: Turn[] | ((p: AgentPaths, t: TmpAgent) => Turn[]), prepare?: (sandboxDir: string) => void) {
+  const t = tmpAgent();
+  const p = t.paths;
   prepare?.(p.sandboxDir);
-  const llm = await fakeLlm(typeof turns === "function" ? turns(p) : turns);
+  const llm = await fakeLlm(typeof turns === "function" ? turns(p, t) : turns);
   closers.push(llm.close);
-  const workspace = makeWorkspace(p, loadConfig(p.configFile), "none");
+  const workspace = makeWorkspace(t.r, p, { isolation: "none", builtinSkills: null });
   const agent = new Agent({ id: "t", name: "t", instructions: "test", model: { id: "fake/model", url: llm.url }, workspace });
   const mastra = new Mastra({ agents: { t: agent }, storage: new LibSQLStore({ id: "t", url: `file:${join(p.dataDir, "test.db")}` }) });
   const toolOutputs = () => llm.requests.flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => String(m.content)));
@@ -60,10 +60,14 @@ describe("agent tools (real agent, fake model)", () => {
     expect(out).not.toContain("sk-should-not-leak");
   });
 
-  it("denies reads outside the sandbox, including its own .env", async () => {
-    const { agent, toolOutputs } = await setup((p) => [call("read", { path: p.envFile }), { text: "ok" }]);
-    await agent.generate("go");
-    expect(toolOutputs().join("\n")).toMatch(/Permission denied.*outside the workspace/);
+  it("denies file-tool reads outside the sandbox: its own .env and config, another agent's .env", async () => {
+    for (const target of [(p: AgentPaths) => p.envFile, (p: AgentPaths) => p.configFile, (_p: AgentPaths, t: TmpAgent) => t.other.envFile, () => "../../other/.env"]) {
+      const { agent, toolOutputs } = await setup((p, t) => [call("read", { path: target(p, t) }), { text: "ok" }]);
+      await agent.generate("go");
+      const out = toolOutputs().join("\n");
+      expect(out).toMatch(/Permission denied/);
+      expect(out).not.toMatch(/own-agent-secret|other-agent-secret/);
+    }
   });
 
   it("requires a read before editing an existing file", async () => {
@@ -79,7 +83,7 @@ describe("agent tools (real agent, fake model)", () => {
     const { agent, p, toolOutputs } = await setup([bash("sleep 1", { background: true }), { text: "ok" }]);
     await agent.generate("go");
     expect(toolOutputs().join("\n")).toContain("not available");
-    expect(readFileSync(p.auditFile, "utf8")).toContain('"outcome":"refused"');
+    expect(readFileSync(join(p.dataDir, "audit.jsonl"), "utf8")).toContain('"outcome":"refused"');
   });
 
   it("holds a risky command for approval, runs it only once approved", async () => {

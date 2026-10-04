@@ -1,9 +1,9 @@
-import { resolve } from "node:path";
-import { eigenHome, homePaths, seedHome } from "../src/mastra/lib/home.ts";
+import { eigenHome, readyHome } from "../src/mastra/lib/home.ts";
 
-const paths = homePaths(eigenHome());
-const created = seedHome(paths, resolve(import.meta.dirname, "../defaults"));
+/** Creates the home folders (and, once, backs up a home from before standalone agents). Agents are created in the studio, never here. */
+const paths = readyHome(eigenHome());
 
-console.log(created.length ? `Created in ${paths.home}:\n  ${created.join("\n  ")}` : `${paths.home} is already set up.`);
-console.log(`\nNext: fill in ${paths.envFile} (bot token, API key) and set telegram.allowedUserIds in ${paths.configFile}.`);
-console.log(`Agents live in ${paths.agentsDir}/<id>/ (config.json + instructions.md); the primary "eigen" uses ${paths.systemPromptFile}. Add a folder there, or use the studio, to add specialists.`);
+console.log(`Eigen home: ${paths.home}
+  agents:  ${paths.agentsDir}/<id>/   one folder per agent (config.json, instructions.md, its own .env)
+  engine:  ${paths.engineDir}/        the engine's own database and logs`);
+console.log(`\nNext: npm run dev (from the repo root), then open the studio at http://localhost:4100 and create your first agent.`);

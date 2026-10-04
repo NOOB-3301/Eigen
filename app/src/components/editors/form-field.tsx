@@ -3,7 +3,7 @@ import { useId, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * A label, a control, and one line under it: the error when there is one, else the hint. Unlike the inspector's Field it needs no
+ * A label, a control, and one line under it: the error when there is one, else the hint. Unlike the builder panels' Field it needs no
  * form context, because the editors here are controlled by plain props. The control gets the id and the aria wiring.
  */
 export function FormField({

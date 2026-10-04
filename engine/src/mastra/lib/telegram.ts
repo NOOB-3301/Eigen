@@ -1,6 +1,6 @@
 /**
- * One Telegram bot = one adapter polling one token. The primary builds its bot at boot from root `telegram`; every other agent
- * that has `telegram.enabled` gets its own, built when the agent loads and stopped when it is replaced or removed.
+ * One Telegram bot = one adapter polling one token. Every agent with `telegram.enabled` has its own bot (its own token, in its own .env),
+ * built when the agent loads and stopped when it is replaced or removed.
  *
  * Telegram allows exactly one getUpdates poller per token (a second one gets 409 and the two fight), and Mastra's
  * `removeAgent` does not stop an agent's channels, so a bot is stopped here, explicitly, before a replacement is added.
@@ -19,6 +19,16 @@ export const ALLOWED_UPDATES = ["message", "edited_message", "callback_query"] a
 /** A request that has not failed this long after it was sent is a healthy long poll (Telegram answers a conflict or a bad token at once). */
 const CONFIRM_MS = 800;
 
+/** Starting polling is retried with this wait, doubling up to the cap, for as long as the failure looks like the network (see transient). */
+const RETRY_BASE_MS = 2000;
+const RETRY_MAX_MS = 30_000;
+
+/**
+ * A failure that waiting can fix: no route to Telegram right now (the adapter's NetworkError, a timed-out connect) or a rate limit.
+ * A bad or revoked token (401), a forbidden call or a bad request will fail the same way again, so those are left as the bot's error.
+ */
+const transient = (e: unknown) => ["NetworkError", "AdapterRateLimitError"].includes((e as Error)?.name ?? "");
+
 export type TelegramBot = {
   adapter: ReturnType<typeof createTelegramAdapter>;
   state(): TelegramRuntime;
@@ -30,9 +40,9 @@ export type TelegramBot = {
 
 type Fetch = (method: string, payload?: unknown, request?: unknown) => Promise<any>;
 
-const same = (a: TelegramRuntime, b: TelegramRuntime) => a.state === b.state && a.username === b.username && a.error === b.error && a.restartRequired === b.restartRequired;
+const same = (a: TelegramRuntime, b: TelegramRuntime) => a.state === b.state && a.username === b.username && a.error === b.error;
 
-export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELEGRAM_API_BASE_URL }: { token: string; allowedUserIds: number[]; apiBaseUrl?: string }): TelegramBot {
+export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELEGRAM_API_BASE_URL, retryBaseMs = RETRY_BASE_MS }: { token: string; allowedUserIds: number[]; apiBaseUrl?: string; retryBaseMs?: number }): TelegramBot {
   // The adapter answers anyone when the list is empty, so a bot without an allow-list is never built.
   if (allowedUserIds.length === 0) throw new Error("telegram: no allowed user ids; the bot would answer anyone");
   const adapter = shortenApprovalButtons(
@@ -43,6 +53,8 @@ export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELE
   let username: string | undefined;
   let stopped = false;
   let confirm: NodeJS.Timeout | undefined;
+  /** Ends the wait between two start attempts at once, so stop() never waits out a backoff. */
+  let wake: (() => void) | undefined;
   const subs = new Set<(t: TelegramRuntime) => void>();
 
   const set = (next: TelegramRuntime) => {
@@ -84,9 +96,24 @@ export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELE
   };
 
   // initialize() runs fire-and-forget inside Mastra.addAgent; a stop() that lands first must not be undone by a late startPolling().
+  // Mastra logs a rejected initialize() once and never calls it again, so a network that is down for a moment at boot (deleteWebhook timing out)
+  // would leave the bot dead until a restart: start is retried here instead. The adapter's own poll loop already backs off once it is running.
+  // The call above has already put the reason in the bot's state ("error"), which the studio shows while this waits.
   const start = inner.startPolling.bind(adapter);
   inner.startPolling = async (config) => {
-    if (!stopped) await start(config);
+    for (let attempt = 0; !stopped; attempt++) {
+      try {
+        return await start(config);
+      } catch (e) {
+        if (stopped || !transient(e)) throw e;
+        const wait = Math.min(retryBaseMs * 2 ** attempt, Math.max(retryBaseMs, RETRY_MAX_MS));
+        if (current.state === "error") set({ ...current, error: `${current.error}; trying again in ${Math.max(1, Math.round(wait / 1000))} s` });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, wait);
+          wake = () => (clearTimeout(timer), resolve());
+        });
+      }
+    }
   };
 
   return {
@@ -100,6 +127,7 @@ export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELE
       if (stopped) return;
       stopped = true;
       clearTimeout(confirm);
+      wake?.();
       subs.clear();
       await adapter.stopPolling().catch(() => undefined);
       await adapter.disconnect().catch(() => undefined);
@@ -107,14 +135,12 @@ export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELE
   };
 }
 
-/** Message handling shared by the primary and specialist bots: per-chat queue, slash commands, Approve/Deny buttons, optional tool chatter. */
 /**
- * `isolatedAs`: the agent id of a specialist whose memory scope is "isolated". Mastra's default memory owner is `telegram:<userId>`, the same for every bot, so
- * without this an isolated agent would share working memory with the primary. It becomes `<id>:telegram:<userId>`, the owner the studio chat uses too.
+ * Message handling for one agent's bot: per-chat queue, slash commands, Approve/Deny buttons, optional tool chatter. Memory belongs to Mastra's
+ * default owner `telegram:<userId>`: each agent has its own storage, so the same person on two agents' bots is two separate memories.
  */
-export function telegramChannels(bot: Pick<TelegramBot, "adapter">, { queue, slash, verbose, isolatedAs }: { queue: ChatQueue; slash: SlashCommandChannelHandler; verbose: () => boolean; isolatedAs?: string }): ChannelConfig {
+export function telegramChannels(bot: Pick<TelegramBot, "adapter">, { queue, slash, verbose }: { queue: ChatQueue; slash: SlashCommandChannelHandler; verbose: () => boolean }): ChannelConfig {
   return {
-    ...(isolatedAs && { resolveResourceId: ({ defaultResourceId }: { defaultResourceId: string }) => `${isolatedAs}:${defaultResourceId}` }),
     adapters: {
       telegram: {
         adapter: bot.adapter,

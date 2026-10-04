@@ -10,17 +10,16 @@ export type CableEdge = Edge<CableData, "cable">;
 
 const COLOR: Record<TopologyEdge["type"], string> = {
   routes: "var(--cable-routes)",
-  delegates: "var(--cable-delegates)",
   uses: "var(--cable-uses)",
 };
 
+/** The fleet has only these two: an agent's bot -> the agent, and the agent -> its own MCP servers. Agents are never wired to each other. */
 export const CABLES: Array<{ kind: TopologyEdge["type"]; label: string }> = [
-  { kind: "routes", label: "Telegram bot" },
-  { kind: "delegates", label: "Can delegate to" },
-  { kind: "uses", label: "Uses tool server" },
+  { kind: "routes", label: "Its Telegram bot" },
+  { kind: "uses", label: "Its tool server" },
 ];
 
-/** A patch cable: soft base stroke; delegation cables carry a moving signal (static when reduced motion is on). */
+/** A patch cable: a soft stroke, thicker while its agent is selected. */
 export const Cable = memo(function Cable({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<CableEdge>) {
   const kind = data?.kind ?? "uses";
   const [path, mx, my] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 });
@@ -39,7 +38,6 @@ export const Cable = memo(function Cable({ id, sourceX, sourceY, targetX, target
             strokeOpacity: kind === "uses" ? 0.7 : 0.85,
           }}
         />
-        {kind === "delegates" && <path d={path} className="cable-signal" style={{ stroke: color, strokeWidth: 3.2, strokeLinecap: "round", fill: "none" }} />}
       </motion.g>
       {data?.label && (
         <EdgeLabelRenderer>

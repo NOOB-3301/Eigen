@@ -9,7 +9,7 @@ afterEach(async () => {
 });
 
 describe("telegramEnvAllowed", () => {
-  it("only TELEGRAM_* names or names some config uses as a bot token", () => {
+  it("only TELEGRAM_* names or the name the agent's config uses as its bot token", () => {
     expect(telegramEnvAllowed("TELEGRAM_BOT_TOKEN_RESEARCHER", [])).toBe(true);
     expect(telegramEnvAllowed("MY_BOT", ["MY_BOT"])).toBe(true);
     for (const n of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "PATH", "HOME", "MY_BOT"]) expect(telegramEnvAllowed(n, ["TELEGRAM_BOT_TOKEN"]), n).toBe(false);
@@ -23,7 +23,7 @@ describe("checkTelegramToken", () => {
     expect(await checkTelegramToken("42:good", tg.url)).toEqual({ ok: true, username: "bot_42_good" });
   });
   it("says so when the variable is not set", async () => {
-    expect(await checkTelegramToken(undefined)).toEqual({ ok: false, error: "that variable is not set in .env" });
+    expect(await checkTelegramToken(undefined)).toEqual({ ok: false, error: "that variable is not set in this agent's keys" });
   });
   it("turns a rejected token into a readable error that does not contain the token", async () => {
     const tg = await fakeTelegram();
@@ -43,32 +43,45 @@ describe("checkTelegramToken", () => {
 });
 
 describe("testModel", () => {
-  const root = (url: string) => ({ models: { fake: { id: "openai/gpt-fake", url, apiKeyEnv: "FAKE_KEY", replyReserve: 4096 } } });
+  const agent = (url: string) => ({ models: { fake: { id: "openai/gpt-fake", url, apiKeyEnv: "FAKE_KEY", replyReserve: 4096 } } });
+  const env = (o: Record<string, string> = { FAKE_KEY: "sk-test-secret-value-123" }) => new Map(Object.entries(o));
 
   it("answers ok with the latency and a short reply", async () => {
     const llm = await fakeLlm([{ text: "ok" }]);
     closers.push(llm.close);
-    const r = await testModel("fake", root(llm.url), { FAKE_KEY: "sk-test-secret-value-123" });
+    const r = await testModel("fake", agent(llm.url), env());
     expect(r).toMatchObject({ ok: true, reply: "ok" });
     expect(r.ms).toBeGreaterThanOrEqual(0);
     expect(llm.requests).toHaveLength(1);
   });
 
   it("an unknown key is an error, not a crash", async () => {
-    expect(await testModel("nope", root("http://127.0.0.1:1"))).toEqual({ ok: false, ms: 0, error: 'no model "nope" in config.json' });
+    expect(await testModel("nope", agent("http://127.0.0.1:1"), env())).toEqual({ ok: false, ms: 0, error: 'no model "nope" in this agent\'s config' });
+  });
+
+  it("never falls back to the engine's environment for a key the agent's .env does not set", async () => {
+    const llm = await fakeLlm([{ text: "ok" }]);
+    closers.push(llm.close);
+    process.env.FAKE_KEY = "from-the-shell";
+    try {
+      expect(await testModel("fake", agent(llm.url), env({}))).toMatchObject({ ok: false, error: "FAKE_KEY is not set in this agent's keys" });
+    } finally {
+      delete process.env.FAKE_KEY;
+    }
+    expect(llm.requests).toHaveLength(0);
   });
 
   it("gives up after the timeout and says how long it waited", async () => {
     const llm = await fakeLlm([{ text: "late", delayMs: 3000 }]);
     closers.push(llm.close);
-    const r = await testModel("fake", root(llm.url), {}, 400);
+    const r = await testModel("fake", agent(llm.url), env(), 400);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/no answer after 0\.4s/);
     expect(r.ms).toBeLessThan(2500);
   });
 
   it("an unreachable model returns an error that never contains the API key", async () => {
-    const r = await testModel("fake", root("http://127.0.0.1:1/v1"), { FAKE_KEY: "super-secret-key-value" }, 5000);
+    const r = await testModel("fake", agent("http://127.0.0.1:1/v1"), env({ FAKE_KEY: "super-secret-key-value" }), 5000);
     expect(r.ok).toBe(false);
     expect(JSON.stringify(r)).not.toContain("super-secret-key-value");
   });

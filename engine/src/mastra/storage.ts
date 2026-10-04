@@ -1,4 +1,5 @@
 import { LibSQLStore } from "@mastra/libsql";
-import { readyPaths } from "./lib/home.ts";
+import { readyHome } from "./lib/home.ts";
 
-export default new LibSQLStore({ id: "eigen-storage", url: `file:${readyPaths().dbFile}` });
+/** Mastra's own storage (workflow snapshots, traces, the chat adapters' state). No agent memory lives here: each agent has its own storage. */
+export default new LibSQLStore({ id: "eigen-engine", url: `file:${readyHome().engineDbFile}` });

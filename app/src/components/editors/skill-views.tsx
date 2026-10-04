@@ -5,8 +5,8 @@ import { FolderPlus, LoaderCircle, Plus, Search, Sparkles, Trash2, TriangleAlert
 import { CreateSkillRequest, type SkillOrigin, type SkillSummary, type SkillWriteResponse } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Button, Modal, Skeleton } from "@/components/ui";
-import { inputCls } from "@/components/inspector/fields";
-import { Callout } from "@/components/settings/controls";
+import { inputCls } from "@/components/builder/panels/fields";
+import { Callout } from "@/components/builder/panels/controls";
 import { FormField } from "./form-field";
 import { MAX_TEXT, MarkdownSurface } from "./markdown-surface";
 import { ConflictBanner, SaveBar, saveShortcut, saveStatus, type SavePhase } from "./parts";
@@ -15,7 +15,7 @@ import { MAX_DESCRIPTION, hasBlankBody, validateSkillDraft, withStarterBody } fr
 /* Pure views for the skill library and the skill editor: data and callbacks come in as props (skill-editor.tsx wires the hooks). */
 
 const ORIGIN: Record<SkillOrigin, { label: string; hint: string; tone: string }> = {
-  user: { label: "Yours", hint: "A folder under ~/.eigen/skills that you can edit", tone: "bg-accent-soft text-accent" },
+  user: { label: "Yours", hint: "A folder in this agent's skills/ that you can edit", tone: "bg-accent-soft text-accent" },
   clawhub: { label: "ClawHub", hint: "Installed from ClawHub. Read-only here", tone: "border border-line text-ink-3" },
 };
 
@@ -59,7 +59,7 @@ export function SkillLibraryView({ skills, loading, selected, onPick, onNew }: {
           <FolderPlus size={20} className="mx-auto text-ink-3" aria-hidden />
           <p className="mt-2 text-[13px] font-medium text-ink">No skills yet</p>
           <p className="mx-auto mt-1 max-w-[44ch] text-[12.5px] text-ink-3">
-            A skill is a folder with a SKILL.md: instructions an agent loads only when its description matches the job. Create one here, or put a folder in ~/.eigen/skills.
+            A skill is a folder with a SKILL.md: instructions an agent loads only when its description matches the job. Create one here, or put a folder in this agent&apos;s skills/ folder.
           </p>
         </div>
       )}
@@ -97,9 +97,7 @@ export function SkillLibraryView({ skills, loading, selected, onPick, onNew }: {
                           <span>The engine skips this skill: {s.problem}</span>
                         </span>
                       )}
-                      <span className="mt-1 block text-[11.5px] text-ink-3" title={s.usedBy.length ? s.usedBy.join(", ") : "Agents set to all skills load it too; only agents that pick skills by name are counted."}>
-                        {s.usedBy.length ? `Used by ${plural(s.usedBy.length, "agent")}` : "No agent lists it by name"}
-                      </span>
+                      <span className={cn("mt-1 block text-[11.5px]", s.enabled ? "text-ok" : "text-ink-3")}>{s.enabled ? "Loaded by this agent" : "Not connected"}</span>
                     </button>
                   </li>
                 );
@@ -180,7 +178,7 @@ export function NewSkillDialog({
         <div className="border-b border-line px-5 pt-5 pb-4">
           <h3 className="text-[16px] font-semibold tracking-[-0.01em] text-ink">New skill</h3>
           <p className="mt-0.5 text-[12.5px] text-ink-3">
-            Creates ~/.eigen/skills/{slug && !slugError ? slug : "<slug>"}/SKILL.md with a starter you can rewrite.
+            Creates skills/{slug && !slugError ? slug : "<slug>"}/SKILL.md with a starter you can rewrite.
           </p>
         </div>
         <div className="space-y-4 px-5 py-5">
@@ -252,8 +250,8 @@ export type SkillEditorViewProps = {
   files: string[];
   /** Why the engine skips the SAVED version, if it does. */
   problem?: string;
-  /** Ids of the agents that list this skill by name. */
-  usedBy: string[];
+  /** Whether the agent loads it (its skills.enabled is "all" or lists it). */
+  enabled: boolean;
   trashing: boolean;
   trashError?: string;
   onSave: () => void;
@@ -275,7 +273,7 @@ export function SkillEditorView(p: SkillEditorViewProps) {
   const serverIssues = p.phase.k === "error" ? p.phase.issues : [];
   const canSave = p.dirty && rules.errors.length === 0 && !saving && p.phase.k !== "conflict";
   const status = saveStatus(p.phase, p.dirty, {
-    savedText: "Saved. Agents that use this skill see it on their next message.",
+    savedText: "Saved. The agent sees it on its next message.",
     // The list below the editor says what is wrong; the bar only says why Save is off.
     problems: rules.errors.length ? [rules.errors.length === 1 ? "Fix the problem listed above to save." : `Fix the ${rules.errors.length} problems listed above to save.`] : [],
   });
@@ -334,8 +332,7 @@ export function SkillEditorView(p: SkillEditorViewProps) {
 
       {ask === "trash" && (
         <Callout tone="warn" title={`Move ${folder} to the trash?`}>
-          It leaves the library and every agent that uses it stops finding it
-          {p.usedBy.length > 0 ? ` (${p.usedBy.join(", ")} list${p.usedBy.length === 1 ? "s" : ""} it by name)` : ""}. The folder goes to ~/.eigen/skills/.trash, so you can move it back by hand.
+          It leaves this agent&apos;s library{p.enabled ? ", and the agent stops loading it" : ""}. The folder goes to the agent&apos;s .trash, so you can move it back by hand.
           <div className="mt-2 flex flex-wrap gap-2">
             <Button
               variant="danger"

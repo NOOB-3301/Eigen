@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, isToolUIPart, lastAssistantMessageIsCompleteWithApprovalResponses, type UIMessage } from "ai";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowDown, ArrowUp, Brain, ChevronRight, CloudOff, Crown, Loader2, MessageSquarePlus, Square, TriangleAlert, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Brain, ChevronRight, CloudOff, Loader2, MessageSquarePlus, Square, TriangleAlert, X } from "lucide-react";
 import type { AgentStatus, ChatHistoryResponse } from "@eigen/engine/schema";
 import type { ChatFailure } from "@/lib/server/chat";
 import { useFleet } from "@/lib/client/api";
@@ -21,7 +21,7 @@ type Block = { kind: "offline" } | { kind: "unavailable"; status?: AgentStatus }
 
 const BLOCK_TEXT = {
   offline: { title: "The engine is offline", body: "Start the engine (npm run dev) and the chat picks up again." },
-  unavailable: { title: "This agent cannot chat", body: "It is disabled or its config is invalid. Fix it in the inspector; chat works once it loads." },
+  unavailable: { title: "This agent cannot chat", body: "It is disabled or its config is invalid. Fix it in the builder; chat works once it loads." },
 } as const;
 
 /** Chat with one agent from the studio (Mastra chatRoute + AI SDK useChat). Shares the agent's memory with its Telegram chat. */
@@ -59,10 +59,9 @@ export function ChatPanel({ agentId, onClose }: { agentId: string; onClose?: () 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <h2 className="truncate text-[15px] font-semibold tracking-[-0.01em] text-ink">{name}</h2>
-            {summary?.primary && <Crown size={13} className="shrink-0 text-crown" aria-label="primary" />}
             {status && <StatusBadge status={status} />}
           </div>
-          <MemoryNote primary={!!summary?.primary} memory={loaded?.data?.memory} />
+          <MemoryNote memory={loaded?.data?.memory} />
         </div>
         <Button variant="quiet" onClick={renew} disabled={!session} className="h-8 shrink-0 px-2" title="Start a new conversation (a new thread; memory carries over)">
           <MessageSquarePlus size={15} />
@@ -96,14 +95,14 @@ export function ChatPanel({ agentId, onClose }: { agentId: string; onClose?: () 
   );
 }
 
-function MemoryNote({ primary, memory }: { primary: boolean; memory?: ChatHistoryResponse["memory"] }) {
+/** The studio chat is the agent's memory of its first allowed Telegram user when it has one, else a studio-only memory. */
+function MemoryNote({ memory }: { memory?: ChatHistoryResponse["memory"] }) {
   if (!memory) return <p className="mt-0.5 h-4 text-[12px] text-ink-3" />;
-  const user = memory.telegramUserId !== undefined ? ` (Telegram user ${memory.telegramUserId})` : "";
-  const text = memory.scope === "isolated" ? "Own memory, isolated" : primary ? "Shares memory with your Telegram chat" : "Shares the primary's memory";
-  const detail =
-    memory.scope === "isolated"
-      ? "This agent keeps its own memory, apart from the primary and your Telegram chat."
-      : `Working memory and recall are shared with your Telegram chat${user}.`;
+  const shared = memory.telegramUserId !== undefined;
+  const text = shared ? "Shares memory with your Telegram chat" : "Studio memory, apart from Telegram";
+  const detail = shared
+    ? `Working memory and recall are the same person as Telegram user ${memory.telegramUserId}.`
+    : "This agent has no Telegram user to share with, so the studio keeps a memory of its own.";
   return (
     <p className="mt-0.5 truncate text-[12px] text-ink-3" title={`${detail} This studio conversation is a thread of its own, so it never mixes into the Telegram one.`}>
       {text}

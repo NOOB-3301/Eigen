@@ -7,10 +7,10 @@ import { cn } from "@/lib/cn";
 import { deleteSecret, putSecret, refreshSecrets } from "@/lib/client/secrets";
 
 /**
- * Write-only field for one ~/.eigen/.env variable. It can say whether the variable is set and let you replace or remove it,
- * but nothing in the studio can read the value back: the typed text is cleared the moment it is sent.
+ * Write-only field for one variable in ONE agent's .env (~/.eigen/agents/<agentId>/.env). It can say whether the variable is set and let you
+ * replace or remove it, but nothing in the studio can read the value back: the typed text is cleared the moment it is sent.
  */
-export function SecretInput({ name, set, label, onSaved }: { name: string; set: boolean; label?: string; onSaved?: () => void }) {
+export function SecretInput({ agentId, name, set, label, onSaved }: { agentId: string; name: string; set: boolean; label?: string; onSaved?: () => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -23,7 +23,7 @@ export function SecretInput({ name, set, label, onSaved }: { name: string; set: 
 
   const done = (next: boolean) => {
     setLocal({ base: set, value: next });
-    void refreshSecrets();
+    void refreshSecrets(agentId);
     onSaved?.();
   };
 
@@ -34,7 +34,7 @@ export function SecretInput({ name, set, label, onSaved }: { name: string; set: 
     setEditing(false);
     setBusy(true);
     setError(null);
-    const err = await putSecret(name, v);
+    const err = await putSecret(agentId, name, v);
     setBusy(false);
     if (err) setError(err);
     else done(true);
@@ -44,7 +44,7 @@ export function SecretInput({ name, set, label, onSaved }: { name: string; set: 
     setConfirmRemove(false);
     setBusy(true);
     setError(null);
-    const err = await deleteSecret(name);
+    const err = await deleteSecret(agentId, name);
     setBusy(false);
     if (err) setError(err);
     else done(false);
@@ -117,7 +117,7 @@ export function SecretInput({ name, set, label, onSaved }: { name: string; set: 
               Cancel
             </Button>
           </div>
-          <p className="pt-1.5 text-[11.5px] text-ink-3">Written to ~/.eigen/.env. It is never shown again, here or anywhere in the studio.</p>
+          <p className="pt-1.5 text-[11.5px] text-ink-3">Written to this agent&apos;s own .env. It is never shown again, here or anywhere in the studio.</p>
         </motion.form>
       )}
       {error && (

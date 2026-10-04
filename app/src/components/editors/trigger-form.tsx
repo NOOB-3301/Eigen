@@ -9,12 +9,12 @@ import { TriggerFormView } from "./trigger-form-view";
  * Controlled, no saving: the builder writes it into the agent's config.json with everything else.
  * `telegramOn`: the agent has a running bot (delivery needs one). `risky`: the agent has bash/workspace or a trusted MCP server,
  * which a github-pr trigger should warn about (a PR's text is untrusted input).
- * `agentId` belongs to the agent whose config holds the trigger; nothing in the form needs it, the builder passes it for its own bookkeeping.
+ * `agentId`: the agent whose config holds the trigger. The GitHub token lives in its .env, and the check runs with it.
  */
-export function TriggerForm({ value, onChange, onRemove, telegramOn, risky }: { agentId: string; value: TriggerInput | Trigger; onChange: (next: TriggerInput) => void; onRemove?: () => void; telegramOn: boolean; risky: boolean }) {
+export function TriggerForm({ agentId, value, onChange, onRemove, telegramOn, risky }: { agentId: string; value: TriggerInput | Trigger; onChange: (next: TriggerInput) => void; onRemove?: () => void; telegramOn: boolean; risky: boolean }) {
   const tokenEnv = value.type === "github-pr" && ENV_NAME.test(value.tokenEnv) ? value.tokenEnv : undefined;
-  const { isSet } = useSecrets(tokenEnv ? [tokenEnv] : []);
-  return <TriggerFormView value={value} onChange={onChange} onRemove={onRemove} telegramOn={telegramOn} risky={risky} tokenSet={isSet(tokenEnv)} onCheckGithub={checkGithub} />;
+  const { isSet } = useSecrets(agentId, tokenEnv ? [tokenEnv] : []);
+  return <TriggerFormView agentId={agentId} value={value} onChange={onChange} onRemove={onRemove} telegramOn={telegramOn} risky={risky} tokenSet={isSet(tokenEnv)} onCheckGithub={(env, repo) => checkGithub(agentId, env, repo)} />;
 }
 
 /** What a new trigger of that type starts as (valid, disabled until the user turns it on). */

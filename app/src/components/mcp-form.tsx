@@ -1,11 +1,11 @@
 "use client";
 import { useState } from "react";
-import { Callout, KeyValueEditor, Labeled, LineList, SelectInput } from "@/components/settings/controls";
+import { Callout, KeyValueEditor, Labeled, LineList, SelectInput } from "@/components/builder/panels/controls";
 import { SecretInput } from "@/components/secret-input";
 import { Button, Segmented, Switch } from "@/components/ui";
-import { inputCls } from "@/components/inspector/fields";
+import { inputCls } from "@/components/builder/panels/fields";
 import { cn } from "@/lib/cn";
-import { putSecret, refreshSecrets, useSecrets } from "@/lib/client/secrets";
+import { putSecret, useSecrets } from "@/lib/client/secrets";
 
 /** One MCP server as config.json holds it: stdio { command, args, env } or remote { url, headers, transport }, plus flags. */
 export type McpServerValue = Record<string, unknown>;
@@ -26,16 +26,18 @@ export function envNameFor(server: string, key: string) {
 }
 
 /**
- * Edits a single MCP server entry (Settings > Tools for root mcpServers, the agent inspector for private servers).
- * `onRename` is optional: leave it out when the name is fixed. Values written as `env:NAME` get a write-only secret field.
+ * Edits one MCP server of one agent (an entry of its tools.mcp). `onRename` is optional: leave it out when the name is fixed.
+ * Values written as `env:NAME` are read from that agent's own .env when the server starts, and get a write-only secret field here.
  */
 export function McpServerForm({
+  agentId,
   name,
   value,
   onChange,
   onRename,
   onRemove,
 }: {
+  agentId: string;
   name: string;
   value: McpServerValue;
   onChange: (next: McpServerValue) => void;
@@ -46,7 +48,7 @@ export function McpServerForm({
   const env = strMap(value.env);
   const headers = strMap(value.headers);
   const refs = [...Object.values(env), ...Object.values(headers)].map(refName).filter((n): n is string => !!n && ENV.test(n));
-  const { isSet } = useSecrets(refs);
+  const { isSet } = useSecrets(agentId, refs);
   const [nameDraft, setNameDraft] = useState(name);
   const [prevName, setPrevName] = useState(name);
   if (name !== prevName) {
@@ -69,7 +71,7 @@ export function McpServerForm({
     if (ref !== undefined)
       return ENV.test(ref) ? (
         <div className="mt-1.5">
-          <SecretInput name={ref} set={isSet(ref)} label={ref} />
+          <SecretInput agentId={agentId} name={ref} set={isSet(ref)} label={ref} />
         </div>
       ) : (
         <p className="mt-1 text-[12px] text-warn">After env: use an upper-case name such as {envNameFor(name, key)}.</p>
@@ -84,11 +86,10 @@ export function McpServerForm({
             className="font-medium text-accent underline underline-offset-2"
             onClick={async () => {
               setMoveError(null);
-              const err = await putSecret(target, val);
+              const err = await putSecret(agentId, target, val);
               if (err) return setMoveError(err);
               const cur = strMap(value[field]);
               patch(field, { ...cur, [key]: `env:${target}` });
-              void refreshSecrets();
             }}
           >
             Move it to .env as {target}

@@ -1,22 +1,32 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/mastra/lib/config.ts";
-import { activeModel, patchState, readState } from "../src/mastra/lib/state.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { activeModelKey, patchState, readState } from "../src/mastra/lib/state.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
-describe("chat state", () => {
+describe("chat state (per agent)", () => {
   it("starts empty, merges patches, and survives a reread", () => {
-    const p = tmpHome();
-    expect(readState(p)).toEqual({});
-    patchState(p, { model: "cloud" });
-    patchState(p, { verbose: true });
-    expect(readState(p)).toEqual({ model: "cloud", verbose: true });
+    const { paths } = tmpAgent();
+    expect(readState(paths.stateFile)).toEqual({});
+    patchState(paths.stateFile, { model: "cloud" });
+    patchState(paths.stateFile, { verbose: true });
+    expect(readState(paths.stateFile)).toEqual({ model: "cloud", verbose: true });
   });
 
-  it("falls back to the default model when the choice is gone from config.json", () => {
-    const p = tmpHome();
-    const cfg = loadConfig(p.configFile);
-    expect(activeModel(cfg, {})).toBe(cfg.defaultModel);
-    expect(activeModel(cfg, { model: "cloud" })).toBe("cloud");
-    expect(activeModel(cfg, { model: "deleted-long-ago" })).toBe(cfg.defaultModel);
+  it("each agent has its own: one agent's /model never moves another's", () => {
+    const a = tmpAgent();
+    const b = tmpAgent({}, { id: "b", home: join(a.paths.dir, "..", "..") });
+    patchState(a.paths.stateFile, { model: "x" });
+    expect(readState(b.paths.stateFile)).toEqual({});
+  });
+
+  it("falls back to the configured model when the choice is gone from config.json", () => {
+    const { paths, r } = tmpAgent({ models: { main: { id: "fake/a", url: "http://x.test/v1" }, alt: { id: "fake/b", url: "http://x.test/v1" } } });
+    expect(activeModelKey(r, paths.stateFile)).toBe("main");
+    patchState(paths.stateFile, { model: "alt" });
+    expect(activeModelKey(r, paths.stateFile)).toBe("alt");
+    patchState(paths.stateFile, { model: "deleted-long-ago" });
+    expect(activeModelKey(r, paths.stateFile)).toBe("main");
+    patchState(paths.stateFile, { model: "constructor" }); // not an own key of models
+    expect(activeModelKey(r, paths.stateFile)).toBe("main");
   });
 });

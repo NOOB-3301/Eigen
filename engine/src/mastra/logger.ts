@@ -1,9 +1,9 @@
 import { appendFileSync } from "node:fs";
 import { PinoLogger } from "@mastra/loggers";
 import { FileTransport } from "@mastra/loggers/file";
-import { readyPaths } from "./lib/home.ts";
+import { readyHome } from "./lib/home.ts";
 
-const { logFile } = readyPaths();
+const { logFile } = readyHome();
 appendFileSync(logFile, ""); // FileTransport throws if the file doesn't exist
 
 export default new PinoLogger({

@@ -20,9 +20,9 @@ export type BuilderApi = {
   connect: (ref: Ref) => void;
   /** Disconnect, asking first when it deletes something the user typed. */
   disconnect: (ref: Ref) => void;
-  /** An adder node was used: add a private server directly, or open the palette on the right group. */
+  /** An adder node was used: add an MCP server or a trigger, or open the skill library. */
   adder: (kind: Adder) => void;
-  agent: { id: string; name: string; role: string; description: string; primary: boolean; enabled: boolean; modelKey: string; memoryScope: string; sandbox: string };
+  agent: { id: string; name: string; role: string; description: string; enabled: boolean; modelKey: string; /** "provider/model" of the model it thinks with. */ modelId: string; /** Memory blocks that are on, for the agent card. */ memory: number };
   /** Connected items by id, for edges and overflow lists. */
   itemsById: Map<string, Item>;
 };

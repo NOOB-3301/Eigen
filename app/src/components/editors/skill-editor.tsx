@@ -6,8 +6,8 @@ import { NewSkillDialog, SkillEditorView, SkillLibraryView } from "./skill-views
 import { isConflict, type SavePhase } from "./parts";
 
 /** The skill library: list, search, create. Pick one to edit. */
-export function SkillLibrary({ onPick, selected }: { onPick: (slug: string) => void; selected?: string | null }) {
-  const { skills, isLoading } = useSkills();
+export function SkillLibrary({ agentId, onPick, selected }: { agentId: string; onPick: (slug: string) => void; selected?: string | null }) {
+  const { skills, isLoading } = useSkills(agentId);
   const [creating, setCreating] = useState(false);
   return (
     <>
@@ -17,8 +17,8 @@ export function SkillLibrary({ onPick, selected }: { onPick: (slug: string) => v
         onClose={() => setCreating(false)}
         existing={skills.map((s) => s.slug)}
         onCreate={async (input) => {
-          const r = await createSkill(input);
-          if (r.ok) toast.success(`Created ${input.slug}`, { description: "Its SKILL.md is in ~/.eigen/skills. Agents that use it see it on their next message." });
+          const r = await createSkill(agentId, input);
+          if (r.ok) toast.success(`Created ${input.slug}`, { description: "Its SKILL.md is in this agent's skills folder. Connect it to let the agent load it." });
           return r;
         }}
         onCreated={onPick}
@@ -27,15 +27,15 @@ export function SkillLibrary({ onPick, selected }: { onPick: (slug: string) => v
   );
 }
 
-/** Edits and saves one skill's SKILL.md on its own (etag, validation, conflict). Read-only for ClawHub skills. */
-export function SkillEditor(props: { slug: string; onClose?: () => void; onDeleted?: () => void }) {
+/** Edits and saves one skill's SKILL.md in one agent's library, on its own (etag, validation, conflict). Read-only for ClawHub skills. */
+export function SkillEditor(props: { agentId: string; slug: string; onClose?: () => void; onDeleted?: () => void }) {
   // Keyed by slug so picking another skill starts from a clean draft instead of carrying the last one over.
   return <SkillEditorBody key={props.slug} {...props} />;
 }
 
-function SkillEditorBody({ slug, onClose, onDeleted }: { slug: string; onClose?: () => void; onDeleted?: () => void }) {
-  const { skill, isLoading, error, refresh } = useSkill(slug);
-  const { skills } = useSkills();
+function SkillEditorBody({ agentId, slug, onClose, onDeleted }: { agentId: string; slug: string; onClose?: () => void; onDeleted?: () => void }) {
+  const { skill, isLoading, error, refresh } = useSkill(agentId, slug);
+  const { skills } = useSkills(agentId);
   // null until the first keystroke: the text on disk is shown (and follows it) until then.
   const [draft, setDraft] = useState<string | null>(null);
   const [phase, setPhase] = useState<SavePhase>({ k: "idle" });
@@ -58,7 +58,7 @@ function SkillEditorBody({ slug, onClose, onDeleted }: { slug: string; onClose?:
     if (draft === null || phase.k === "saving") return;
     const sent = draft;
     setPhase({ k: "saving" });
-    const r = await saveSkill(slug, sent, etag).catch((e: unknown) => ({ ok: false as const, issues: [e instanceof Error ? e.message : "the request failed"] }));
+    const r = await saveSkill(agentId, slug, sent, etag).catch((e: unknown) => ({ ok: false as const, issues: [e instanceof Error ? e.message : "the request failed"] }));
     if (r.ok) {
       // saveSkill has already refreshed this skill and the list. Keep anything typed while the save was in flight; it is based on the version just written.
       base.current = r.etag;
@@ -80,13 +80,13 @@ function SkillEditorBody({ slug, onClose, onDeleted }: { slug: string; onClose?:
   const moveToTrash = async () => {
     if (trash.busy) return;
     setTrash({ busy: true });
-    const r = await deleteSkill(slug).catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : "the request failed" }));
+    const r = await deleteSkill(agentId, slug).catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : "the request failed" }));
     if (!r.ok) {
       setTrash({ busy: false, error: r.error ?? "the folder could not be moved" });
       return;
     }
     setTrash({ busy: false, done: true });
-    toast.success(`Moved ${slug} to the trash`, { description: "The folder is in ~/.eigen/skills/.trash." });
+    toast.success(`Moved ${slug} to the trash`, { description: "The folder is in the agent's .trash." });
     onDeleted?.();
   };
 
@@ -103,7 +103,7 @@ function SkillEditorBody({ slug, onClose, onDeleted }: { slug: string; onClose?:
       theirs={skill?.text ?? null}
       files={skill?.files ?? []}
       problem={skill?.problem}
-      usedBy={skills.find((s) => s.slug === slug)?.usedBy ?? []}
+      enabled={skills.find((s) => s.slug === slug)?.enabled ?? false}
       trashing={trash.busy}
       trashError={trash.error}
       onSave={() => void save(base.current)}

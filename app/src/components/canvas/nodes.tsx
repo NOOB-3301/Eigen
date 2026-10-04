@@ -2,24 +2,25 @@
 import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { motion, useReducedMotion } from "motion/react";
-import { AlertTriangle, Crown, FolderCog, CalendarClock, Plug, Send, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertTriangle, CalendarClock, FolderCog, Plug, Send, ShieldCheck, Sparkles } from "lucide-react";
 import type { AgentSummary, TelegramState } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
 import { TelegramDot, telegramView } from "./telegram-state";
 
 type Common = { leaving?: boolean; enterDelay?: number; dimmed?: boolean };
-export type AgentNodeData = AgentSummary & { builtinTools: string[]; overrides: string[]; selected?: boolean } & Common;
-/** One Telegram bot, wired to the agent it answers as. `offline`: the engine is not running, so `state` is only what the config implies. */
-export type ChannelNodeData = { channel: "telegram"; routesTo: string; tokenEnv?: string; state: TelegramState; username?: string; offline?: boolean } & Common;
-export type McpNodeData = { name: string; owner: string; trusted: boolean; error?: string } & Common;
+export type AgentNodeData = AgentSummary & { builtinTools: string[] } & Common;
+/** An agent's own Telegram bot (one bot, one agent). `offline`: the engine is not running, so `state` is unknown. */
+export type ChannelNodeData = { channel: "telegram"; agentId: string; state: TelegramState; username?: string; offline?: boolean } & Common;
+/** One of an agent's own MCP servers. */
+export type McpNodeData = { name: string; agentId: string; trusted: boolean; error?: string } & Common;
 
 export type AgentNode = Node<AgentNodeData, "agent">;
 export type ChannelNode = Node<ChannelNodeData, "channel">;
 export type McpNode = Node<McpNodeData, "mcp">;
 export type StudioNode = AgentNode | ChannelNode | McpNode;
 
-const TOOL_ICON: Record<string, typeof FolderCog> = { workspace: FolderCog, schedule: CalendarClock, skills: Sparkles };
+const TOOL_ICON: Record<string, typeof FolderCog> = { workspace: FolderCog, schedule: CalendarClock };
 
 /** Enter/leave choreography shared by every node. Leaving nodes are kept briefly by the canvas so they can animate out. */
 function Shell({ data, children, className }: { data: Common; children: React.ReactNode; className?: string }) {
@@ -41,8 +42,6 @@ const handle = "!border-line-strong !bg-panel";
 export const AgentNodeView = memo(function AgentNodeView({ data, selected }: NodeProps<AgentNode>) {
   const status = data.runtime.status;
   const problems = data.runtime.problems.length;
-  const modelInherited = !data.overrides.includes("model");
-  const otherOverrides = data.overrides.filter((o) => o !== "model").length;
   return (
     <Shell data={data}>
       {selected && (
@@ -56,7 +55,7 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
       <div
         className={cn(
           "w-[264px] rounded-[var(--radius-module)] border bg-panel shadow-float transition-colors",
-          data.primary ? "border-crown/50" : "border-line",
+          "border-line",
           !data.enabled && "opacity-60 saturate-50",
         )}
       >
@@ -66,11 +65,6 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-[14.5px] font-semibold tracking-[-0.01em] text-ink">{data.name}</span>
-              {data.primary && (
-                <span title="Primary: owns Telegram and supervises the team" className="text-crown">
-                  <Crown size={13} strokeWidth={2.2} aria-label="primary" />
-                </span>
-              )}
               <span className="ml-auto flex items-center gap-1" title={`${STATUS[status].label}: ${STATUS[status].hint}`}>
                 <StatusDot status={status} pulse />
                 <span className="sr-only">{STATUS[status].label}</span>
@@ -82,14 +76,8 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
           </div>
         </div>
         <div className="flex items-center gap-1.5 border-t border-line px-3 py-2">
-          <span
-            className={cn(
-              "inline-flex h-5 max-w-[130px] items-center gap-1 rounded-md px-1.5 font-mono text-[11px]",
-              modelInherited ? "border border-dashed border-line-strong text-ink-3" : "bg-accent-soft text-accent",
-            )}
-            title={modelInherited ? "Model inherited from the root default" : "Model set on this agent"}
-          >
-            <span className="truncate">{data.modelKey}</span>
+          <span className="inline-flex h-5 max-w-[130px] items-center gap-1 rounded-md bg-accent-soft px-1.5 font-mono text-[11px] text-accent" title="The model this agent thinks with (a key in its own models)">
+            <span className="truncate">{data.modelKey || "no model"}</span>
           </span>
           <span className="ml-auto flex items-center gap-1">
             {data.builtinTools.map((t) => {
@@ -102,7 +90,7 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
             })}
           </span>
         </div>
-        {(problems > 0 || otherOverrides > 0 || !data.enabled) && (
+        {(problems > 0 || !data.enabled) && (
           <div className="flex items-center gap-2 border-t border-line px-3 py-1.5 text-[11.5px]">
             {problems > 0 && (
               <span className={cn("inline-flex items-center gap-1", status === "stale" ? "text-warn" : "text-bad")}>
@@ -111,11 +99,6 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
               </span>
             )}
             {!data.enabled && <span className="text-ink-3">Disabled</span>}
-            {otherOverrides > 0 && (
-              <span className="ml-auto text-ink-3" title={data.overrides.join(", ")}>
-                {otherOverrides} {otherOverrides === 1 ? "override" : "overrides"}
-              </span>
-            )}
           </div>
         )}
         <Handle type="source" position={Position.Right} className={handle} />
@@ -149,7 +132,6 @@ export const ChannelNodeView = memo(function ChannelNodeView({ data }: NodeProps
             </span>
           </div>
           <div className={cn("truncate text-[12px]", view.tone === "error" ? "text-bad" : view.tone === "missing" ? "text-warn" : "text-ink-2")}>{stateText}</div>
-          <div className="truncate font-mono text-[11px] text-ink-3">{data.tokenEnv ?? "no token variable"}</div>
         </div>
         <Handle type="source" position={Position.Right} className="!border-routes !bg-panel" />
       </div>
@@ -180,7 +162,7 @@ export const McpNodeView = memo(function McpNodeView({ data }: NodeProps<McpNode
               </span>
             )}
           </div>
-          <div className="truncate text-[11.5px] text-ink-3">{data.error ? "Failed to connect" : data.owner === "root" ? "Shared server" : `Private to ${data.owner}`}</div>
+          <div className="truncate text-[11.5px] text-ink-3">{data.error ? "Failed to connect" : "Tool server"}</div>
         </div>
       </div>
     </Shell>

@@ -4,7 +4,7 @@ import { CalendarClock, ChevronRight, CircleCheck, CircleX, GitPullRequest, Load
 import type { Trigger, TriggerRun, TriggerRuntime, TriggerState } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Button, Skeleton } from "@/components/ui";
-import { Callout } from "@/components/settings/controls";
+import { Callout } from "@/components/builder/panels/controls";
 import { absoluteTime, clip, duration, relativeTime } from "./format";
 
 /* The run history as a pure view: the wrapper in trigger-runs.tsx supplies the runs, the agent's triggers and the clock. */

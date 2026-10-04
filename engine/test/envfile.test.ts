@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { formatValue, parseEnv, secretStatuses, setSecret, syncEnv, unsetSecret } from "../src/mastra/lib/envfile.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { formatValue, parseEnv, readEnvFile, secretStatuses, setSecret, unsetSecret, valueFingerprint } from "../src/mastra/lib/envfile.ts";
+
+/** One agent's .env, by path: every function takes the file it works on. */
+const envFile = () => join(mkdtempSync(join(tmpdir(), "eigen-env-")), "agent", ".env");
 
 describe("parseEnv", () => {
   it("reads bare, quoted and exported values, skips comments, last line wins", () => {
@@ -23,55 +28,60 @@ describe("formatValue", () => {
 
 describe("setSecret / unsetSecret", () => {
   it("adds, replaces and removes a variable, leaving every other line alone, and keeps the file 0600", () => {
-    const p = tmpHome();
-    writeFileSync(p.envFile, "# my keys\nKEEP=1\nTELEGRAM_BOT_TOKEN=old\nAFTER=2\nTELEGRAM_BOT_TOKEN=older\n");
-    setSecret(p, "TELEGRAM_BOT_TOKEN", "111:new");
-    expect(readFileSync(p.envFile, "utf8")).toBe("# my keys\nKEEP=1\nAFTER=2\nTELEGRAM_BOT_TOKEN=111:new\n");
-    setSecret(p, "OPENAI_API_KEY", "sk-abc 123");
-    expect(parseEnv(readFileSync(p.envFile, "utf8")).get("OPENAI_API_KEY")).toBe("sk-abc 123");
-    expect(statSync(p.envFile).mode & 0o777).toBe(0o600);
-    expect(unsetSecret(p, "KEEP")).toBe(true);
-    expect(unsetSecret(p, "KEEP")).toBe(false);
-    expect(readFileSync(p.envFile, "utf8")).not.toContain("KEEP");
-    expect(readFileSync(p.envFile, "utf8")).toContain("# my keys");
+    const file = envFile();
+    setSecret(file, "FIRST", "x");
+    writeFileSync(file, "# my keys\nKEEP=1\nTELEGRAM_BOT_TOKEN=old\nAFTER=2\nTELEGRAM_BOT_TOKEN=older\n");
+    setSecret(file, "TELEGRAM_BOT_TOKEN", "111:new");
+    expect(readFileSync(file, "utf8")).toBe("# my keys\nKEEP=1\nAFTER=2\nTELEGRAM_BOT_TOKEN=111:new\n");
+    setSecret(file, "OPENAI_API_KEY", "sk-abc 123");
+    expect(parseEnv(readFileSync(file, "utf8")).get("OPENAI_API_KEY")).toBe("sk-abc 123");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(unsetSecret(file, "KEEP")).toBe(true);
+    expect(unsetSecret(file, "KEEP")).toBe(false);
+    expect(readFileSync(file, "utf8")).not.toContain("KEEP");
+    expect(readFileSync(file, "utf8")).toContain("# my keys");
   });
 
-  it("creates the file when missing and rejects bad names (no path or shell tricks)", () => {
-    const p = tmpHome();
-    expect(existsSync(p.envFile)).toBe(true);
-    for (const bad of ["lower", "1A", "A B", "A=B", "A\nB", "../X", "", "A".repeat(65)]) expect(() => setSecret(p, bad, "v")).toThrow(/invalid variable name/);
+  it("creates the file (and its folder) when missing, 0600, and rejects bad names (no path or shell tricks)", () => {
+    const file = envFile();
+    expect(existsSync(file)).toBe(false);
+    setSecret(file, "A_KEY", "v");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    for (const bad of ["lower", "1A", "A B", "A=B", "A\nB", "../X", "", "A".repeat(65)]) expect(() => setSecret(file, bad, "v")).toThrow(/invalid variable name/);
   });
 });
 
 describe("secretStatuses", () => {
   it("reports set / unset per referenced name and never a value", () => {
-    const p = tmpHome();
-    writeFileSync(p.envFile, "A_KEY=secret-value\nEMPTY=\n");
-    const out = secretStatuses(p, new Map([["A_KEY", ["models.cloud"]], ["EMPTY", ["telegram"]], ["MISSING", ["agents.x.telegram"]]]));
+    const file = envFile();
+    setSecret(file, "A_KEY", "secret-value");
+    writeFileSync(file, "A_KEY=secret-value\nEMPTY=\nSTALE_KEY=old-value\nlower=x\n");
+    const out = secretStatuses(file, new Map([["A_KEY", ["models.cloud"]], ["EMPTY", ["telegram"]], ["MISSING", ["triggers.prs"]]]));
     expect(out).toEqual([
       { name: "A_KEY", set: true, usedBy: ["models.cloud"] },
       { name: "EMPTY", set: false, usedBy: ["telegram"] },
-      { name: "MISSING", set: false, usedBy: ["agents.x.telegram"] },
+      { name: "MISSING", set: false, usedBy: ["triggers.prs"] },
+      { name: "STALE_KEY", set: true, usedBy: [] },
     ]);
+    expect(JSON.stringify(out)).not.toContain("old-value");
     expect(JSON.stringify(out)).not.toContain("secret-value");
   });
 });
 
-describe("syncEnv", () => {
-  it("applies new and changed values, removes what it applied, and never touches the shell's own variables", () => {
-    const p = tmpHome();
-    const env: NodeJS.ProcessEnv = { FROM_SHELL: "shell", ADOPT: "same" };
-    const owned = new Map<string, string>();
-    writeFileSync(p.envFile, "NEW_KEY=one\nFROM_SHELL=file\nADOPT=same\n");
-    expect(syncEnv(p, owned, env).sort()).toEqual(["NEW_KEY"]);
-    expect(env).toMatchObject({ NEW_KEY: "one", FROM_SHELL: "shell", ADOPT: "same" });
+describe("readEnvFile and valueFingerprint", () => {
+  it("reads one agent's file fresh (empty when missing) and never touches process.env", () => {
+    const file = envFile();
+    expect(readEnvFile(file).size).toBe(0);
+    setSecret(file, "ONLY_HERE_KEY", "v1");
+    expect(readEnvFile(file).get("ONLY_HERE_KEY")).toBe("v1");
+    setSecret(file, "ONLY_HERE_KEY", "v2");
+    expect(readEnvFile(file).get("ONLY_HERE_KEY")).toBe("v2");
+    expect(process.env.ONLY_HERE_KEY).toBeUndefined();
+  });
 
-    writeFileSync(p.envFile, "NEW_KEY=two\nADOPT=changed\n");
-    expect(syncEnv(p, owned, env).sort()).toEqual(["ADOPT", "NEW_KEY"]);
-    expect(env).toMatchObject({ NEW_KEY: "two", ADOPT: "changed", FROM_SHELL: "shell" });
-
-    writeFileSync(p.envFile, "");
-    expect(syncEnv(p, owned, env).sort()).toEqual(["ADOPT", "NEW_KEY"]);
-    expect(env).toEqual({ FROM_SHELL: "shell" });
+  it("fingerprints change with the value and never contain it", () => {
+    expect(valueFingerprint(undefined)).toBe("");
+    expect(valueFingerprint("a-secret")).not.toBe(valueFingerprint("b-secret"));
+    expect(valueFingerprint("a-secret")).not.toContain("secret");
   });
 });

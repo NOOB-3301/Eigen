@@ -47,12 +47,15 @@ export async function fakeLlm(turns: Turn[]) {
   const requests: RecordedRequest[] = [];
   const ordered = turns.filter((t) => !t.when);
   const embeddings: string[] = [];
+  /** The Authorization header of every request (chat and embeddings), "" when there was none: which key reached the server. */
+  const authorizations: string[] = [];
   let i = 0;
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const json = JSON.parse(body);
+      authorizations.push(String(req.headers.authorization ?? ""));
       if (req.url?.endsWith("/embeddings")) {
         const inputs: string[] = [json.input].flat();
         embeddings.push(...inputs);
@@ -67,5 +70,5 @@ export async function fakeLlm(turns: Turn[]) {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}/v1`, requests, embeddings, close: () => new Promise<void>((r) => server.close(() => r())) };
+  return { url: `http://127.0.0.1:${port}/v1`, requests, embeddings, authorizations, close: () => new Promise<void>((r) => server.close(() => r())) };
 }

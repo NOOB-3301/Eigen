@@ -1,8 +1,12 @@
+/**
+ * The schedule tool: an agent sets reminders and recurring jobs for itself. They are Mastra schedules (Mastra keeps them in the engine's own
+ * database and fires them by agent id, so they work for agents added at runtime), and every action is scoped to the calling agent: one agent
+ * can never list, pause or delete another agent's reminders.
+ */
 import type { AgentSchedule, Schedules } from "@mastra/core/schedules";
 import { createTool } from "@mastra/core/tools";
 import { filter, map, truncate } from "lodash-es";
 import { z } from "zod";
-import { getConfig } from "../config.ts";
 import { dayjs } from "../time.ts";
 
 const SOURCE = "reminder";
@@ -17,12 +21,13 @@ const Input = z.object({
 });
 
 const ours = (s: unknown): s is AgentSchedule => (s as AgentSchedule)?.metadata?.source === SOURCE;
+const ownedBy = (agentId: string) => (s: unknown): s is AgentSchedule => ours(s) && (s as AgentSchedule).agentId === agentId;
 
-export const listReminders = async (schedules: Schedules, agentId: string) => filter((await schedules.list({ agentId })) as AgentSchedule[], ours);
+export const listReminders = async (schedules: Schedules, agentId: string) => filter((await schedules.list({ agentId })) as AgentSchedule[], ownedBy(agentId));
 
-/** One-shot reminders are cron rows underneath, so they are deleted once they have fired. */
-export async function pruneOneShots(schedules: Schedules) {
-  const fired = filter((await schedules.list()) as AgentSchedule[], (s) => ours(s) && s.metadata?.once === true && !!s.lastFireAt);
+/** One-shot reminders are cron rows underneath, so this agent's are deleted once they have fired. */
+export async function pruneOneShots(schedules: Schedules, agentId: string) {
+  const fired = filter(await listReminders(schedules, agentId), (s) => s.metadata?.once === true && !!s.lastFireAt);
   await Promise.all(map(fired, (s) => schedules.delete(s.id)));
   return fired.length;
 }
@@ -36,7 +41,8 @@ const view = (zone: string) => (s: AgentSchedule) => ({
   next: dayjs(s.nextFireAt).tz(zone).format("ddd D MMM YYYY HH:mm"),
 });
 
-export const makeScheduleTool = (zone: () => string = () => getConfig().timezone) =>
+/** `zone`: the agent's timezone (cron is read in it). */
+export const makeScheduleTool = (zone: () => string) =>
   createTool({
     id: "schedule",
     description:
@@ -51,7 +57,7 @@ export const makeScheduleTool = (zone: () => string = () => getConfig().timezone
       const show = view(zone());
 
       if (action === "list") {
-        await pruneOneShots(schedules);
+        await pruneOneShots(schedules, agentId);
         return { schedules: map(await listReminders(schedules, agentId), show) };
       }
       if (action === "create") {
@@ -63,7 +69,8 @@ export const makeScheduleTool = (zone: () => string = () => getConfig().timezone
         return "error" in made ? made : show(made);
       }
       const found = id && (await schedules.get(id));
-      if (!found || !ours(found)) return fail(`no reminder with id ${id}`);
+      // Same answer for "no such id" and "another agent's": an agent must not learn what other agents scheduled.
+      if (!found || !ownedBy(agentId)(found)) return fail(`no reminder with id ${id}`);
       if (action === "delete") return (await schedules.delete(found.id), { deleted: found.id });
       return show((await schedules.update(found.id, { status: action === "pause" ? "paused" : "active" })) as AgentSchedule);
     },

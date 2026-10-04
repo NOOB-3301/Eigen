@@ -1,20 +1,10 @@
 "use client";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowLeft, Blocks, Crown, Maximize2, Plus, Search, Settings as SettingsIcon, SunMoon } from "lucide-react";
+import { ArrowLeft, Blocks, Maximize2, Plus, Search, SunMoon } from "lucide-react";
 import type { AgentSummary } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Kbd, Monogram, StatusDot, spring } from "@/components/ui";
-import type { SettingsSection } from "@/components/settings/settings-dialog";
-
-const SETTINGS_SECTIONS: Array<{ section: SettingsSection; label: string }> = [
-  { section: "models", label: "Models" },
-  { section: "telegram", label: "Telegram" },
-  { section: "memory", label: "Memory" },
-  { section: "sandbox", label: "Sandbox" },
-  { section: "tools", label: "Tools" },
-  { section: "advanced", label: "Advanced" },
-];
 
 type Item = { key: string; label: string; sub?: string; icon: React.ReactNode; run: () => void; group: "Agents" | "Builder" | "Actions"; trailing?: React.ReactNode };
 
@@ -43,7 +33,6 @@ export function CommandPalette({
   onCreate,
   onToggleTheme,
   onFit,
-  onSettings,
 }: {
   open: boolean;
   onClose: () => void;
@@ -53,12 +42,11 @@ export function CommandPalette({
   onBuild: (id: string | null) => void;
   /** The agent whose builder is open, if any. */
   builderId: string | null;
-  /** The agent in focus (builder or inspector), offered as "Build" even before anything is typed. */
+  /** The agent in focus (builder or summary card), offered as "Build" even before anything is typed. */
   currentId: string | null;
   onCreate: () => void;
   onToggleTheme: () => void;
   onFit: () => void;
-  onSettings: (section?: SettingsSection) => void;
 }) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
@@ -84,7 +72,7 @@ export function CommandPalette({
     const agentItems: Item[] = agents
       .map((a) => ({ a, s: Math.max(score(query, a.name), score(query, a.id), score(query, a.role) * 0.6) }))
       .filter((x) => x.s > 0)
-      .sort((x, y) => y.s - x.s || Number(y.a.primary) - Number(x.a.primary))
+      .sort((x, y) => y.s - x.s || x.a.name.localeCompare(y.a.name))
       .map(({ a }) => ({
         key: `agent:${a.id}`,
         group: "Agents",
@@ -93,7 +81,6 @@ export function CommandPalette({
         icon: <Monogram id={a.id} name={a.name} size={24} />,
         trailing: (
           <span className="flex items-center gap-2">
-            {a.primary && <Crown size={12} className="text-crown" aria-label="primary" />}
             <StatusDot status={a.runtime.status} />
           </span>
         ),
@@ -105,14 +92,12 @@ export function CommandPalette({
       .map((a) => ({ key: `build:${a.id}`, group: "Builder" as const, label: `Build ${a.name}`, sub: "wire its components", icon: <Blocks size={15} />, run: () => onBuild(a.id) }));
     const actions: Item[] = [
       { key: "create", group: "Actions", label: "Create agent", icon: <Plus size={15} />, run: onCreate },
-      ...(builderId ? [{ key: "team", group: "Actions" as const, label: "Back to the team", icon: <ArrowLeft size={15} />, run: () => onBuild(null) }] : [{ key: "fit", group: "Actions" as const, label: "Fit the whole team in view", icon: <Maximize2 size={14} />, run: onFit }]),
+      ...(builderId ? [{ key: "team", group: "Actions" as const, label: "Back to all agents", icon: <ArrowLeft size={15} />, run: () => onBuild(null) }] : [{ key: "fit", group: "Actions" as const, label: "Fit every agent in view", icon: <Maximize2 size={14} />, run: onFit }]),
       { key: "theme", group: "Actions", label: "Switch theme", icon: <SunMoon size={15} />, run: onToggleTheme },
-      { key: "settings", group: "Actions", label: "Settings", icon: <SettingsIcon size={15} />, run: () => onSettings() },
-      ...SETTINGS_SECTIONS.map(({ section, label }) => ({ key: `settings:${section}`, group: "Actions", label: `Settings: ${label}`, icon: <SettingsIcon size={15} />, run: () => onSettings(section) })),
     ].filter((a) => !query || score(query, a.label) > 0 || a.key === "create") as Item[];
     // Typing "build ..." puts the builder first; otherwise agents come first, as before.
     return asBuild ? [...buildItems, ...actions] : [...agentItems, ...buildItems, ...actions];
-  }, [agents, q, onJump, onBuild, builderId, currentId, onCreate, onToggleTheme, onFit, onSettings]);
+  }, [agents, q, onJump, onBuild, builderId, currentId, onCreate, onToggleTheme, onFit]);
 
   const clamped = Math.min(active, Math.max(0, items.length - 1));
   const choose = (i: number) => {

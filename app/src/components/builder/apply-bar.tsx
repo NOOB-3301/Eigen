@@ -4,8 +4,8 @@ import { AlertTriangle, Check, ChevronUp, Loader2, Rocket } from "lucide-react";
 import type { Draft } from "@/lib/client/draft";
 import { cn } from "@/lib/cn";
 import { Button, Kbd, spring } from "@/components/ui";
-import { Conflict, DraftDiff } from "@/components/inspector/review";
-import type { Phase } from "@/components/inspector/use-agent-draft";
+import { Conflict, DraftDiff } from "./review";
+import type { Phase } from "./use-agent-draft";
 import type { Change } from "./model";
 
 type Status = { tone: string; icon: React.ReactNode; text: string };
@@ -61,7 +61,7 @@ type Props = {
   inset: number;
 };
 
-/** The one place a change becomes real: it counts what is staged, shows what it is, and applies it (with the Inspector's conflict and issue handling). */
+/** The one place a change becomes real: it counts what is staged, shows what it is, and applies it (conflicts, issues, the engine reload). */
 export function ApplyBar({ phase, dirty, changes, issues, engineOnline, base, draft, agentId, reviewOpen, setReviewOpen, onApply, onDiscard, onKeepEditing, onReloadTheirs, onOverwrite, inset }: Props) {
   const status = statusOf(phase, dirty, changes, issues, engineOnline);
   const busy = phase.k === "saving";

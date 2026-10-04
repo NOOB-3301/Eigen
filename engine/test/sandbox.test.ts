@@ -1,13 +1,14 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { needsApproval } from "../src/mastra/lib/tools/approval.ts";
 import { appendAudit } from "../src/mastra/lib/audit.ts";
-import { loadConfig } from "../src/mastra/lib/config.ts";
 import { hasSecret, redact } from "../src/mastra/lib/secrets.ts";
-import { makeSandbox, parseEnvFile, refreshSkillEnv, resolveIsolation, sandboxEnv } from "../src/mastra/lib/sandbox.ts";
+import { makeSandbox, parseEnvFile, refreshSkillEnv, resolveIsolation, sandboxEnv, sandboxReach } from "../src/mastra/lib/sandbox.ts";
 import { touchesSkillEnv, vetCall } from "../src/mastra/lib/tools/workspace.ts";
-import { tmpHome } from "./helpers/home.ts";
+import { SandboxSchema } from "../src/mastra/lib/schema.ts";
+import { tmpAgent } from "./helpers/agent-folder.ts";
 
 const bash = (input: Record<string, unknown>) => ({ workspaceToolName: "mastra_workspace_execute_command", input });
 
@@ -37,19 +38,19 @@ describe("secrets and audit", () => {
   });
 
   it("writes redacted, truncated JSON lines", () => {
-    const p = tmpHome();
-    appendAudit(p.auditFile, { tool: "bash", input: { command: `echo ${"x".repeat(5000)} && export TOKEN=hunter2` } });
-    const line = JSON.parse(readFileSync(p.auditFile, "utf8").trim());
+    const file = join(tmpAgent().paths.dataDir, "audit.jsonl");
+    appendAudit(file, { tool: "bash", input: { command: `echo ${"x".repeat(5000)} && export TOKEN=hunter2` } });
+    const line = JSON.parse(readFileSync(file, "utf8").trim());
     expect(line.tool).toBe("bash");
     expect(line.input.command.length).toBeLessThanOrEqual(2000);
-    expect(readFileSync(p.auditFile, "utf8")).not.toContain("hunter2");
+    expect(readFileSync(file, "utf8")).not.toContain("hunter2");
     expect(line.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
 
 describe("sandbox env", () => {
   it("is a whitelist: no secrets, HOME and caches inside the sandbox", () => {
-    const p = tmpHome();
+    const p = tmpAgent().paths;
     const env = sandboxEnv(p, { PATH: "/bin", ANTHROPIC_API_KEY: "k", TELEGRAM_BOT_TOKEN: "t", HTTPS_PROXY: "http://proxy:3128", LANG: "C" });
     expect(env).toMatchObject({ PATH: "/bin", HTTPS_PROXY: "http://proxy:3128", LANG: "C", HOME: p.sandboxHomeDir, CLAWHUB_WORKDIR: p.sandboxDir });
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
@@ -67,8 +68,8 @@ describe("isolation", () => {
 });
 
 describe("vetCall", () => {
-  const p = tmpHome();
-  const cfg = loadConfig(p.configFile);
+  const { paths: p, r } = tmpAgent();
+  const cfg = r.sandbox;
 
   it("allows plain commands and non-bash tools", () => {
     expect(vetCall(p, cfg, bash({ command: "ls" }))).toBeUndefined();
@@ -91,9 +92,8 @@ describe("skill env", () => {
   });
 
   it("applies to the next command without a restart, and the sandbox's own variables win", () => {
-    const p = tmpHome();
-    const cfg = loadConfig(p.configFile);
-    const sandbox = makeSandbox(p, cfg, "none");
+    const { paths: p, r } = tmpAgent();
+    const sandbox = makeSandbox(p, r.sandbox, "none");
     const built = () => (sandbox as unknown as { buildEnv: (e?: object) => Record<string, string> }).buildEnv();
     expect(built().FIRECRAWL_API_KEY).toBeUndefined();
 
@@ -115,4 +115,34 @@ describe("touchesSkillEnv", () => {
     [{ workspaceToolName: "mastra_workspace_write_file", input: { path: "notes.md" } }, false],
     [{ workspaceToolName: "mastra_workspace_execute_command", input: { command: "ls" } }, false],
   ])("%j -> %s", (call, expected) => expect(touchesSkillEnv(call)).toBe(expected));
+});
+
+describe("what the sandbox may reach", () => {
+  const policy = (patch: Record<string, unknown> = {}) => SandboxSchema.parse(patch);
+
+  it("opens its sandbox read-write and its skills read-only, and hides the rest of eigen's home", () => {
+    const { paths: p, home } = tmpAgent();
+    const reach = sandboxReach(p, policy(), null);
+    expect(reach.home).toBe(realpathSync(home));
+    expect(reach.sandboxDir).toBe(realpathSync(p.sandboxDir));
+    expect(reach.readOnly).toEqual([realpathSync(p.skillsDir)]);
+    expect(reach.readWrite).toEqual([]);
+  });
+
+  it("drops configured paths inside eigen's home or containing it: other agents, this agent's .env, ~ itself", () => {
+    const { paths: p, other, home } = tmpAgent();
+    const reach = sandboxReach(p, policy({ readOnlyPaths: [other.dir, p.envFile, home, "/", tmpdir()], readWritePaths: [p.dir, join(home, "agents")] }), null);
+    const all = [...reach.readOnly, ...reach.readWrite];
+    for (const leaked of [other.dir, p.envFile, home, p.dir, join(home, "agents"), "/"].map((x) => realpathSync(x))) expect(all, leaked).not.toContain(leaked);
+    expect(all.filter((x) => x.startsWith(realpathSync(home)))).toEqual([realpathSync(p.skillsDir)]);
+    expect(reach.dropped.length).toBe(7);
+  });
+
+  it("keeps configured paths outside eigen's home", () => {
+    const { paths: p } = tmpAgent();
+    const outside = mkdtempSync(join(tmpdir(), "eigen-outside-"));
+    const reach = sandboxReach(p, policy({ readOnlyPaths: [outside], readWritePaths: [outside] }), null);
+    expect(reach.readOnly).toContain(realpathSync(outside));
+    expect(reach.readWrite).toEqual([realpathSync(outside)]);
+  });
 });

@@ -2,36 +2,211 @@
  * Shared contract between the engine and the web app (`@eigen/engine/schema`).
  * Pure: zod + types only, no node:* imports, so Next.js can import it from client or server code.
  *
- * Ownership rule: the root ~/.eigen/config.json owns SHARED resources (model catalog, telegram, sandbox policy,
- * embedder, MCP server catalog). An agent's ~/.eigen/.agents/<id>/config.json REFERENCES those by name and
- * OVERRIDES only per-agent knobs. Anything an agent leaves out is inherited from the root.
+ * Every agent is STANDALONE. Its folder ~/.eigen/agents/<id>/ holds everything it uses, and nothing is shared between agents:
+ *   config.json          AgentConfigSchema below: its models, memory and storage, tools, sandbox policy, Telegram bot, triggers
+ *   .env                 its secrets (model keys, bot token, storage token, GitHub token). Write-only from the studio; config.json holds only NAMES
+ *   instructions.md      its role prompt
+ *   soul.md              its persona, when soul.enabled
+ *   skills/<slug>/       its skill library (SKILL.md per skill)
+ *   sandbox/             its workspace (the only place its shell and file tools may write)
+ *   memory.db            its storage, when memory.storage has no remote url
+ *   data/                its run history and state
+ * There is no root config.json and no root .env. Agents never call each other: wiring agents together is the next phase (workflows).
  */
 import { z } from "zod";
-import type { Config, ModelEntry } from "./config.ts";
 
-export const AGENT_SCHEMA_VERSION = 1;
+export const AGENT_SCHEMA_VERSION = 2;
 export const AGENT_CONFIG_FILE = "config.json";
+/** Each agent's secrets file, inside its folder. */
+export const AGENT_ENV_FILE = ".env";
 
 const posInt = z.number().int().positive();
 const strMap = z.record(z.string(), z.string());
 /** Names of .env variables the studio may write (and config may reference). Upper-case so they cannot be confused with config keys. */
 export const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+const EnvName = (example: string) => z.string().regex(ENV_NAME, `upper-case env var name, e.g. ${example}`);
 export const AgentId = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase slug: a-z, 0-9, '-', max 32 chars");
-
-/** Same shapes as root `mcpServers`, for servers private to one agent. */
-const mcpFlags = { enabled: z.boolean().default(true), trusted: z.boolean().default(false) };
-const AgentMcpStdio = z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), env: strMap.optional(), ...mcpFlags });
-const AgentMcpRemote = z.object({ url: z.url(), headers: strMap.optional(), transport: z.enum(["http", "sse"]).optional(), ...mcpFlags });
-
-/** Tools that are code in the engine, not MCP. The allowlist is what an agent may use. */
-export const BUILTIN_TOOLS = ["workspace", "schedule", "skills"] as const;
-
-/** A slug for a skill folder under ~/.eigen/skills: "pdf", or "@owner/slug" for ClawHub installs. Also the name an agent's `skills.inherit` lists. Never contains "..", a leading dot, or a backslash. */
+/** Key of an entry in an agent's `models`. */
+export const ModelKey = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/, "letters, digits, '_' or '-', max 40 chars");
+/** Name of an MCP server of an agent. MCP tools are named `<server>_<tool>`. */
+export const McpName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,31}$/, "letters, digits or '-', max 32 chars (no '_': tools are named <server>_<tool>)");
+/** A skill folder under the agent's skills/: "pdf", or "@owner/slug" for ClawHub installs. Never contains "..", a leading dot, or a backslash. */
 export const SkillSlug = z.string().max(100).regex(/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9]+(-[a-z0-9]+)*$/, "lowercase slug such as pdf-tools, or @owner/slug");
 export const TriggerId = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase slug: a-z, 0-9, '-', max 32 chars");
 /** owner/name of a GitHub repo. "." and ".." are valid characters but never a name: in the API path they would climb out of /repos/. */
 export const GITHUB_REPO = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 const CRON_FIELDS = /^\s*\S+(\s+\S+){4}\s*$/;
+/** A plain file name in the agent folder (no sub-folders, nothing to traverse). */
+const FolderMd = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/, "a file name ending in .md, in the agent folder");
+
+/* ------------------------------------------------------------------------------------------------ */
+/* Models (the LLM node)                                                                              */
+/* ------------------------------------------------------------------------------------------------ */
+
+export const ModelSchema = z.object({
+  /** "provider/model", as Mastra's model router spells it: "anthropic/claude-sonnet-5-5", "ollama-cloud/gpt-oss:120b", "ollama/llama3.2". */
+  id: z.string().regex(/^[^/\s]+\/\S+$/, 'use "provider/model"'),
+  /** An OpenAI-compatible endpoint (Ollama, LM Studio, a proxy). Omitted: the provider's own API. */
+  url: z.url().optional(),
+  /** Variable in THIS agent's .env that holds the key. Omitted: the provider's usual name (defaultApiKeyEnv), or no key for a model with a `url`. */
+  apiKeyEnv: EnvName("ANTHROPIC_API_KEY").optional(),
+  /** Prompt budget for servers that silently truncate (Ollama): the engine trims history to contextWindow - replyReserve. */
+  contextWindow: posInt.optional(),
+  replyReserve: posInt.default(4096),
+});
+export type ModelEntry = z.infer<typeof ModelSchema>;
+export type ModelInput = z.input<typeof ModelSchema>;
+export const EmbedderSchema = ModelSchema.pick({ id: true, url: true, apiKeyEnv: true });
+
+/**
+ * The .env variable a model's key is read from when its entry names none. A model with a `url` and no `apiKeyEnv` gets no key (a local server).
+ * The engine passes this key to Mastra itself and never lets the model router fall back to the process environment, so one agent can never
+ * use another agent's (or the shell's) key.
+ */
+export function defaultApiKeyEnv(m: Pick<ModelEntry, "id" | "url" | "apiKeyEnv">): string | undefined {
+  if (m.apiKeyEnv) return m.apiKeyEnv;
+  if (m.url) return undefined;
+  const provider = m.id.slice(0, m.id.indexOf("/"));
+  const known = PROVIDER_KEY_ENV[provider];
+  return known === null ? undefined : (known ?? `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`);
+}
+/**
+ * Where a provider's usual key variable is not `<PROVIDER>_API_KEY`, checked against Mastra's provider registry (about 60 of its 211 providers differ;
+ * these are the common ones). Only the DEFAULT name is affected: the engine always hands the key to Mastra itself, so an entry that sets
+ * `apiKeyEnv` to anything works for any provider. null: a local provider, no key.
+ */
+const PROVIDER_KEY_ENV: Record<string, string | null> = {
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
+  "ollama-cloud": "OLLAMA_API_KEY",
+  zai: "ZHIPU_API_KEY",
+  alibaba: "DASHSCOPE_API_KEY",
+  huggingface: "HF_TOKEN",
+  togetherai: "TOGETHER_API_KEY",
+  "fireworks-ai": "FIREWORKS_API_KEY",
+  moonshotai: "MOONSHOT_API_KEY",
+  vercel: "AI_GATEWAY_API_KEY",
+  volcengine: "ARK_API_KEY",
+  friendli: "FRIENDLI_TOKEN",
+  digitalocean: "DIGITALOCEAN_ACCESS_TOKEN",
+  "perplexity-agent": "PERPLEXITY_API_KEY",
+  ollama: null,
+  lmstudio: null,
+};
+
+/* ------------------------------------------------------------------------------------------------ */
+/* Memory (the storage node and the memory blocks that plug into it)                                  */
+/* ------------------------------------------------------------------------------------------------ */
+
+export const DEFAULT_WORKING_MEMORY_TEMPLATE = `# About the user
+- Name:
+- Timezone:
+- Preferences:
+- Current focus:
+- Standing instructions:
+`;
+
+/** resource: one per person, across all their chats with this agent. thread: one per conversation. */
+export const MemoryScope = z.enum(["resource", "thread"]);
+
+export const StorageSchema = z.object({
+  /** Off: the agent keeps nothing between messages, and every memory block must be off too. */
+  enabled: z.boolean().default(true),
+  provider: z.literal("libsql").default("libsql"),
+  /**
+   * Omitted: memory.db in this agent's folder. Otherwise a remote LibSQL database (Turso, sqld). Never a `file:` URL: that could point at any
+   * file on the machine, including another agent's memory.
+   */
+  url: z
+    .string()
+    .regex(/^(libsql|https|wss):\/\/\S+$/, "a remote LibSQL URL (libsql://, https:// or wss://); leave it out for this agent's own memory.db")
+    .optional(),
+  /** Variable in this agent's .env holding the remote database's auth token. */
+  authTokenEnv: EnvName("LIBSQL_AUTH_TOKEN").optional(),
+});
+
+export const MemorySchema = z.object({
+  storage: StorageSchema.prefault({}),
+  /** The last `count` messages of the conversation, sent with every turn. */
+  lastMessages: z.object({ enabled: z.boolean().default(true), count: posInt.max(500).default(20) }).prefault({}),
+  /** A markdown document the agent keeps up to date about the person (Mastra working memory). The template is its starting shape. */
+  workingMemory: z
+    .object({ enabled: z.boolean().default(true), scope: MemoryScope.default("resource"), template: z.string().min(1).max(20_000).default(DEFAULT_WORKING_MEMORY_TEMPLATE) })
+    .prefault({}),
+  /** Finds old messages by meaning (vector search in the storage) and adds them, with `messageRange` messages around each. */
+  semanticRecall: z
+    .object({
+      enabled: z.boolean().default(false),
+      scope: MemoryScope.default("resource"),
+      topK: posInt.max(50).default(4),
+      messageRange: posInt.max(20).default(2),
+      embedder: EmbedderSchema.prefault({ id: "ollama/nomic-embed-text", url: "http://localhost:11434/v1" }),
+    })
+    .prefault({}),
+  /** Mastra Observational Memory: background Observer/Reflector agents compress old turns into observations. */
+  observational: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Key in this agent's `models`. Omitted: the agent's own model. */
+      model: ModelKey.optional(),
+      messageTokens: posInt.default(8000),
+      reflectionTokens: posInt.default(20_000),
+      activateAfterIdle: z.string().regex(/^\d+(s|m|h)$/, 'a duration such as "30m"').default("30m"),
+      retrieval: z.boolean().default(true),
+    })
+    .prefault({}),
+  /** Mastra's experimental Subconscious: a curate agent keeps durable knowledge and pins, delivered every turn. Needs semantic recall AND observational memory. */
+  subconscious: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Key in this agent's `models`. It calls tools with strict schemas, so a weak model fails it. Omitted: the observational model. */
+      model: ModelKey.optional(),
+      pins: z.boolean().default(true),
+      tools: z.boolean().default(true),
+      maxPins: posInt.max(100).default(20),
+      maxCharacters: posInt.max(20_000).default(2000),
+    })
+    .prefault({}),
+});
+export type MemoryConfig = z.infer<typeof MemorySchema>;
+/** The memory blocks, in canvas order. Each needs the storage node. */
+export const MEMORY_BLOCKS = ["lastMessages", "workingMemory", "semanticRecall", "observational", "subconscious"] as const;
+export type MemoryBlock = (typeof MEMORY_BLOCKS)[number];
+
+/* ------------------------------------------------------------------------------------------------ */
+/* Tools, sandbox, triggers                                                                           */
+/* ------------------------------------------------------------------------------------------------ */
+
+/** Tools that are code in the engine, not MCP. workspace: files + shell in the agent's sandbox, and its skills. schedule: the agent sets reminders for itself. */
+export const BUILTIN_TOOLS = ["workspace", "schedule"] as const;
+
+const mcpFlags = { enabled: z.boolean().default(true), trusted: z.boolean().default(false) };
+/** `env` and `headers` values may be "env:NAME": read from this agent's .env when the server starts. */
+export const McpStdioSchema = z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), env: strMap.optional(), ...mcpFlags });
+export const McpRemoteSchema = z.object({ url: z.url(), headers: strMap.optional(), transport: z.enum(["http", "sse"]).optional(), ...mcpFlags });
+export const McpServerSchema = z.union([McpStdioSchema, McpRemoteSchema]);
+export type McpServer = z.infer<typeof McpServerSchema>;
+export const isRemoteMcp = (s: McpServer): s is z.infer<typeof McpRemoteSchema> => "url" in s;
+
+/** macOS only: seatbelt can read everything unless told otherwise. (On Linux the sandbox never sees your home.) */
+export const DEFAULT_DENY_READ = [
+  "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.config", "~/.netrc", "~/.npmrc", "~/.zsh_history", "~/.bash_history",
+  "~/Library/Keychains", "~/Library/Application Support", "~/Library/Mail", "~/Library/Messages", "~/Library/Safari", "~/Library/Cookies",
+  "~/Documents", "~/Desktop", "~/Downloads",
+];
+
+/**
+ * The agent's shell and file tools run here. Whatever these lists say, the engine always hides the rest of ~/.eigen from the sandbox: other agents'
+ * folders, and this agent's own .env, config.json and memory.db. Only its sandbox/ (read-write) and skills/ (read-only) are visible.
+ */
+export const SandboxSchema = z.object({
+  isolation: z.enum(["auto", "seatbelt", "bwrap", "none"]).default("auto"),
+  allowNetwork: z.boolean().default(true),
+  readWritePaths: z.array(z.string()).default([]),
+  readOnlyPaths: z.array(z.string()).default([]),
+  denyReadPaths: z.array(z.string()).default(DEFAULT_DENY_READ),
+  commandTimeoutMs: posInt.default(120_000),
+  maxTimeoutSec: posInt.default(900),
+});
 
 /**
  * What a trigger's `prompt` may reference as {{name}}. The engine fills them from the event and always wraps the event data (not the prompt) in an
@@ -52,9 +227,9 @@ const triggerCommon = {
 };
 
 /**
- * Something that wakes an agent up on its own. Defined in the agent's config.json, hot reloaded with it, and stopped when the agent is replaced or trashed.
- * cron: a five-field cron expression in `timezone` (default: the root timezone).
- * github-pr: polls the GitHub REST API for pull requests of one repo with the token in `tokenEnv` (a .env variable NAME; the token never goes in a config file).
+ * Something that wakes an agent up on its own. Hot reloaded with the agent, and stopped when the agent is replaced or trashed.
+ * cron: a five-field cron expression in `timezone` (default: the agent's timezone).
+ * github-pr: polls the GitHub REST API for pull requests of one repo with the token in `tokenEnv` (a variable in this agent's .env).
  *   The first poll only records the PRs that are already open; it never fires for them.
  */
 export const TriggerSchema = z.discriminatedUnion("type", [
@@ -63,7 +238,7 @@ export const TriggerSchema = z.discriminatedUnion("type", [
     ...triggerCommon,
     type: z.literal("github-pr"),
     repo: z.string().regex(GITHUB_REPO, "owner/name"),
-    tokenEnv: z.string().regex(ENV_NAME, "upper-case env var name, e.g. GITHUB_TOKEN"),
+    tokenEnv: EnvName("GITHUB_TOKEN"),
     /** opened: a PR the poller has not seen. updated: a seen PR whose head commit changed. */
     events: z.array(z.enum(["opened", "updated"])).min(1).default(["opened"]),
     intervalSec: z.number().int().min(60).max(3600).default(300),
@@ -73,152 +248,94 @@ export const TriggerSchema = z.discriminatedUnion("type", [
 export type Trigger = z.infer<typeof TriggerSchema>;
 export type TriggerInput = z.input<typeof TriggerSchema>;
 
+/* ------------------------------------------------------------------------------------------------ */
+/* The agent                                                                                          */
+/* ------------------------------------------------------------------------------------------------ */
+
 export const AgentConfigSchema = z
   .object({
     schemaVersion: z.literal(AGENT_SCHEMA_VERSION).default(AGENT_SCHEMA_VERSION),
-    /** Must equal the folder name. Also the Mastra agent id and the memory resource namespace. */
+    /** Must equal the folder name. Also the Mastra agent id. */
     id: AgentId,
     name: z.string().min(1).max(64),
     /** Short label for the UI ("researcher", "planner"). */
-    role: z.string().min(1).max(40),
-    /** What the agent is for. The primary reads this to decide when to delegate, so write it for a model. */
-    description: z.string().min(1).max(1000),
+    role: z.string().min(1).max(40).default("assistant"),
+    /** What the agent is for, shown in the studio. */
+    description: z.string().max(1000).default(""),
     enabled: z.boolean().default(true),
-    /** Exactly one enabled agent is primary: it supervises the rest and answers on the root Telegram bot by default. */
-    primary: z.boolean().default(false),
-    /** Key into root `models`. Omitted: root `defaultModel` (or the chat's /model choice for the primary). */
-    model: z.string().min(1).optional(),
+    /** IANA time zone for triggers, schedules and the date in the prompt. Omitted: the machine's. */
+    timezone: z.string().min(1).max(64).optional(),
+    /** This agent's model catalog. Keys are referenced by `model`, `memory.observational.model` and `memory.subconscious.model`. */
+    models: z.record(ModelKey, ModelSchema).refine((m) => Object.keys(m).length > 0, "add at least one model"),
+    /** The model the agent thinks with: a key in `models`. The /model command in chat switches between this agent's models. */
+    model: ModelKey,
     instructions: z
       .object({
-        /** Relative to the agent folder. Missing file + no inline = config error. Markdown only, so it can never point the editor at .env or a config. */
-        file: z.string().regex(/\.md$/, "must be a .md file").default("instructions.md"),
-        /** Used instead of `file` when set; handy for one-liners created from the UI. */
-        inline: z.string().optional(),
-        /** Prepend ~/.eigen/SOUL.md (shared persona). */
-        includeSoul: z.boolean().default(true),
-        /** Append the curated ~/.eigen/memory/*.md block. Defaults to true for the primary only. */
-        includeMemoryFiles: z.boolean().optional(),
+        /** In the agent folder. Missing file + no inline = the agent is invalid. */
+        file: FolderMd.default("instructions.md"),
+        /** Used instead of `file` when set. */
+        inline: z.string().max(100_000).optional(),
       })
       .prefault({}),
+    /** The persona block of the prompt, from `file` in the agent folder. */
+    soul: z.object({ enabled: z.boolean().default(false), file: FolderMd.default("soul.md") }).prefault({}),
+    memory: MemorySchema.prefault({}),
     tools: z
       .object({
         builtin: z.array(z.enum(BUILTIN_TOOLS)).default(["workspace"]),
-        mcp: z
-          .object({
-            /** Which root `mcpServers` this agent sees: all, none, or a named subset. */
-            inherit: z.union([z.literal("all"), z.literal("none"), z.array(z.string().min(1))]).default("none"),
-            /** Servers only this agent connects to. Names must not collide with root servers. */
-            servers: z.record(z.string(), z.union([AgentMcpStdio, AgentMcpRemote])).default({}),
-          })
-          .prefault({}),
+        /** This agent's MCP servers. */
+        mcp: z.record(McpName, McpServerSchema).default({}),
+        mcpStartupTimeoutMs: posInt.default(20_000),
       })
       .prefault({}),
-    /** Partial overrides, deep-merged over root `memory`. Embedder and cron always come from the root. */
-    memory: z
-      .object({
-        /** isolated: own threads + working memory. shared: same resource as the primary (sees the user's profile). */
-        scope: z.enum(["isolated", "shared"]).default("isolated"),
-        /** 0 turns the recent-message history off (the agent then sees only the current message plus whatever recall and observation give it). */
-        lastMessages: z.number().int().min(0).optional(),
-        semanticRecall: z.object({ enabled: z.boolean(), topK: posInt, messageRange: posInt }).partial().optional(),
-        observational: z.object({ enabled: z.boolean() }).partial().optional(),
-      })
-      .prefault({}),
-    limits: z.object({ maxSteps: posInt.optional() }).prefault({}),
-    /** shared: ~/.eigen/sandbox. own: ~/.eigen/.agents/<id>/sandbox (same isolation policy as root). */
-    sandbox: z.object({ mode: z.enum(["shared", "own"]).default("shared") }).prefault({}),
-    delegation: z
-      .object({
-        /** Who may call this agent as a sub-agent. */
-        acceptsFrom: z.enum(["primary", "any", "none"]).default("primary"),
-        /** Agents this one may delegate to (the primary implicitly gets every agent that accepts from it). */
-        canDelegateTo: z.array(AgentId).default([]),
-      })
-      .prefault({}),
-    /**
-     * Chat with this agent on Telegram through a bot of its own (create it with @BotFather; one token serves exactly one agent).
-     * The primary defaults to the root bot (root `telegram.tokenEnv`); every other agent is off until `enabled` and `tokenEnv` are set.
-     */
+    /** Which of the agent's own skills (skills/<slug>/) it loads. Needs the workspace tool. */
+    skills: z.object({ enabled: z.union([z.literal("all"), z.array(SkillSlug)]).default("all") }).prefault({}),
+    sandbox: SandboxSchema.prefault({}),
+    limits: z.object({ maxSteps: posInt.max(200).default(25) }).prefault({}),
+    /** Chat with this agent on Telegram through its own bot (create one with @BotFather; one token serves exactly one agent). */
     telegram: z
       .object({
-        enabled: z.boolean().optional(),
-        /** Name of the .env variable that holds this agent's bot token. The token itself never goes in a config file. */
-        tokenEnv: z.string().regex(ENV_NAME, "upper-case env var name, e.g. TELEGRAM_BOT_TOKEN_RESEARCHER").optional(),
-        /** Telegram user ids allowed to talk to this agent. Omitted: root `telegram.allowedUserIds`. */
-        allowedUserIds: z.array(z.number().int()).optional(),
-      })
-      .prefault({}),
-    /**
-     * The persona block of the prompt. shared: ~/.eigen/SOUL.md. own: `file` in this agent's folder (soul.md). none: no soul.
-     * Omitted `source` follows `instructions.includeSoul` (true = shared), so existing configs keep working.
-     */
-    soul: z
-      .object({
-        source: z.enum(["shared", "own", "none"]).optional(),
-        /** A plain file name in the agent folder (no sub-folders: the folder watcher only looks one level deep, and there is nothing to traverse). */
-        file: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/, "a file name ending in .md, in the agent folder").default("soul.md"),
-      })
-      .prefault({}),
-    /** Which skills from ~/.eigen/skills this agent can load (needs the workspace tool). all = today's behaviour. The agent's own sandbox/skills always stay available. */
-    skills: z
-      .object({
-        inherit: z.union([z.literal("all"), z.literal("none"), z.array(SkillSlug)]).default("all"),
+        enabled: z.boolean().default(false),
+        /** Variable in this agent's .env holding the bot token. */
+        tokenEnv: EnvName("TELEGRAM_BOT_TOKEN").default("TELEGRAM_BOT_TOKEN"),
+        /** Telegram user ids allowed to talk to the bot. Never empty while enabled: the bot would answer anyone. */
+        allowedUserIds: z.array(z.number().int().positive()).default([]),
       })
       .prefault({}),
     triggers: z.array(TriggerSchema).default([]),
   })
-  .refine((a) => !(a.primary && a.delegation.acceptsFrom === "primary"), {
-    path: ["delegation", "acceptsFrom"],
-    message: 'the primary cannot accept delegation "from primary"; use "none" or "any"',
+  .refine((a) => a.model in a.models, { path: ["model"], message: "must name an entry in models" })
+  .refine((a) => !a.memory.observational.model || a.memory.observational.model in a.models, { path: ["memory", "observational", "model"], message: "must name an entry in models" })
+  .refine((a) => !a.memory.subconscious.model || a.memory.subconscious.model in a.models, { path: ["memory", "subconscious", "model"], message: "must name an entry in models" })
+  .refine((a) => a.memory.storage.enabled || MEMORY_BLOCKS.every((b) => !a.memory[b].enabled), {
+    path: ["memory", "storage", "enabled"],
+    message: "every memory block needs the storage: turn storage on, or the memory blocks off",
   })
-  .refine((a) => !a.delegation.canDelegateTo.includes(a.id), { path: ["delegation", "canDelegateTo"], message: "an agent cannot delegate to itself" })
+  .refine((a) => !a.memory.subconscious.enabled || (a.memory.semanticRecall.enabled && a.memory.observational.enabled), {
+    path: ["memory", "subconscious", "enabled"],
+    message: "subconscious needs semantic recall and observational memory",
+  })
+  .refine((a) => !a.memory.storage.url?.startsWith("libsql://") || !!a.memory.storage.authTokenEnv, {
+    path: ["memory", "storage", "authTokenEnv"],
+    message: "a libsql:// database needs an auth token: name the .env variable that holds it",
+  })
   .refine((a) => new Set(a.triggers.map((t) => t.id)).size === a.triggers.length, { path: ["triggers"], message: "trigger ids must be unique within an agent" });
 
 export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 
-/* ------------------------------------------------------------------------------------------------ */
-/* Resolution: agent config + root config -> effective values (with provenance for the UI).          */
-/* ------------------------------------------------------------------------------------------------ */
-
-export type Source = "agent" | "root";
-
-export type ResolvedTelegram = {
-  enabled: boolean;
-  /** Env var holding the bot token; undefined only for a specialist that has not been given one yet. */
-  tokenEnv?: string;
-  allowedUserIds: number[];
-  /** root: the bot / allow-list came from root config.json; agent: this agent's own file names them. */
-  source: Source;
-};
-
-export type ResolvedAgent = {
-  id: string;
-  name: string;
-  role: string;
-  description: string;
-  enabled: boolean;
-  primary: boolean;
+/** The settings an agent runs with: its config with defaults filled in, its timezone decided and its model looked up. */
+export type ResolvedAgent = Omit<AgentConfig, "schemaVersion" | "model" | "timezone" | "limits"> & {
   modelKey: string;
   model: ModelEntry;
-  instructions: AgentConfig["instructions"] & { includeMemoryFiles: boolean };
-  builtinTools: AgentConfig["tools"]["builtin"];
-  /** Root server names this agent connects to (after `inherit`), plus its private ones. */
-  mcp: { inherited: string[]; own: AgentConfig["tools"]["mcp"]["servers"] };
-  memory: Config["memory"] & { scope: AgentConfig["memory"]["scope"] };
+  timezone: string;
   maxSteps: number;
-  sandboxMode: AgentConfig["sandbox"]["mode"];
-  delegation: AgentConfig["delegation"];
-  telegram: ResolvedTelegram;
-  /** `source` is already resolved against instructions.includeSoul. `file` is only read when source is "own". */
-  soul: { source: NonNullable<AgentConfig["soul"]["source"]>; file: string };
-  skills: AgentConfig["skills"];
-  triggers: Trigger[];
-  /** Dotted path -> where the effective value came from. Only for fields an agent can override. */
-  provenance: Record<string, Source>;
 };
 
-const from = (v: unknown): Source => (v === undefined ? "root" : "agent");
+export function resolveAgent(a: AgentConfig, machineTimezone: string): ResolvedAgent {
+  const { schemaVersion: _version, model, timezone, limits, ...rest } = a;
+  return { ...rest, modelKey: model, model: a.models[model]!, timezone: timezone ?? machineTimezone, maxSteps: limits.maxSteps };
+}
 
 const validTimezone = (zone: string) => {
   try {
@@ -229,110 +346,99 @@ const validTimezone = (zone: string) => {
   }
 };
 
-/** Cross-checks references against the root config. Returns problems instead of throwing so the UI can show all of them. */
-export function agentProblems(a: AgentConfig, root: Config): string[] {
+/** Problems the schema cannot see. Returned instead of thrown so the studio can show all of them; any problem keeps the agent from loading. */
+export function agentProblems(a: AgentConfig): string[] {
   const problems: string[] = [];
-  if (a.model && !(a.model in root.models)) problems.push(`model "${a.model}" is not in root config.json models`);
-  const inherit = a.tools.mcp.inherit;
-  if (Array.isArray(inherit)) inherit.filter((n) => !(n in root.mcpServers)).forEach((n) => problems.push(`tools.mcp.inherit: "${n}" is not in root mcpServers`));
-  Object.keys(a.tools.mcp.servers)
-    .filter((n) => n in root.mcpServers)
-    .forEach((n) => problems.push(`tools.mcp.servers.${n} shadows a root mcpServer; rename it or inherit the root one`));
-  for (const t of a.triggers)
-    if (t.type === "cron" && t.timezone && !validTimezone(t.timezone)) problems.push(`triggers.${t.id}.timezone: "${t.timezone}" is not a time zone`);
-  if (a.telegram.enabled && !a.primary && !a.telegram.tokenEnv) problems.push("telegram.tokenEnv: name the .env variable that holds this agent's bot token");
-  if (a.telegram.enabled && (a.telegram.allowedUserIds ?? root.telegram.allowedUserIds).length === 0) problems.push("telegram: no allowed user ids (set telegram.allowedUserIds here or in root config.json); the bot would answer anyone");
+  if (a.timezone && !validTimezone(a.timezone)) problems.push(`timezone: "${a.timezone}" is not a time zone`);
+  for (const t of a.triggers) if (t.type === "cron" && t.timezone && !validTimezone(t.timezone)) problems.push(`triggers.${t.id}.timezone: "${t.timezone}" is not a time zone`);
+  if (a.telegram.enabled && a.telegram.allowedUserIds.length === 0) problems.push("telegram: add at least one allowed user id; without one the bot would answer anyone");
   return problems;
 }
 
-function resolveAgentTelegram(a: AgentConfig, root: Pick<Config, "telegram">): ResolvedTelegram {
-  return {
-    enabled: a.telegram.enabled ?? a.primary,
-    tokenEnv: a.telegram.tokenEnv ?? (a.primary ? root.telegram.tokenEnv : undefined),
-    allowedUserIds: a.telegram.allowedUserIds ?? root.telegram.allowedUserIds,
-    source: a.telegram.tokenEnv ? "agent" : "root",
-  };
-}
-
-export function resolveAgent(a: AgentConfig, root: Config): ResolvedAgent {
-  const modelKey = a.model ?? root.defaultModel;
-  const inherit = a.tools.mcp.inherit;
-  const rootServers = Object.keys(root.mcpServers).filter((n) => root.mcpServers[n]!.enabled);
-  const m = a.memory;
-  return {
-    id: a.id,
-    name: a.name,
-    role: a.role,
-    description: a.description,
-    enabled: a.enabled,
-    primary: a.primary,
-    modelKey,
-    model: root.models[modelKey]!,
-    instructions: { ...a.instructions, includeMemoryFiles: a.instructions.includeMemoryFiles ?? a.primary },
-    builtinTools: a.tools.builtin,
-    mcp: { inherited: inherit === "all" ? rootServers : inherit === "none" ? [] : rootServers.filter((n) => inherit.includes(n)), own: a.tools.mcp.servers },
-    memory: {
-      ...root.memory,
-      scope: m.scope,
-      lastMessages: m.lastMessages ?? root.memory.lastMessages,
-      semanticRecall: { ...root.memory.semanticRecall, ...m.semanticRecall },
-      observational: { ...root.memory.observational, ...m.observational },
-      // Subconscious knowledge is a singleton tied to the user's resource; only the primary / shared-scope agents get it.
-      knowledge: { ...root.memory.knowledge, enabled: root.memory.knowledge.enabled && (a.primary || m.scope === "shared") },
-    },
-    maxSteps: a.limits.maxSteps ?? root.limits.maxSteps,
-    sandboxMode: a.sandbox.mode,
-    delegation: a.delegation,
-    telegram: resolveAgentTelegram(a, root),
-    soul: { source: a.soul.source ?? (a.instructions.includeSoul ? "shared" : "none"), file: a.soul.file },
-    skills: a.skills,
-    triggers: a.triggers,
-    provenance: {
-      model: from(a.model),
-      "limits.maxSteps": from(a.limits.maxSteps),
-      "memory.lastMessages": from(m.lastMessages),
-      "memory.semanticRecall": from(m.semanticRecall),
-      "memory.observational": from(m.observational),
-      "telegram.allowedUserIds": from(a.telegram.allowedUserIds),
-    },
-  };
-}
-
-/** Problems that span agents (run after every scan). Keyed by agent id; "*" for global ones. */
-export function fleetProblems(agents: AgentConfig[], root: Pick<Config, "telegram"> = { telegram: { tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [] } }): Record<string, string[]> {
+/**
+ * Problems between agents, keyed by agent id. Only resources that must never be shared are checked here: two agents on one remote database.
+ * (Two agents on one Telegram bot token is checked by the engine, which compares the token VALUES in each agent's .env.)
+ */
+export function fleetProblems(agents: AgentConfig[]): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  const add = (id: string, msg: string) => (out[id] ??= []).push(msg);
-  const enabled = agents.filter((a) => a.enabled);
-  const primaries = enabled.filter((a) => a.primary);
-  if (primaries.length !== 1) add("*", `exactly one enabled agent must be primary (found ${primaries.length}: ${primaries.map((a) => a.id).join(", ") || "none"})`);
-  const ids = new Set(enabled.map((a) => a.id));
-  const tokenOwner = new Map<string, string>();
-  // The primary is checked first (then by id) so a specialist that reuses the root bot's token is the one flagged, never the primary.
-  const ordered = [...enabled].sort((a, b) => Number(b.primary) - Number(a.primary) || a.id.localeCompare(b.id));
-  for (const a of ordered) {
-    a.delegation.canDelegateTo.filter((t) => !ids.has(t)).forEach((t) => add(a.id, `delegation.canDelegateTo: "${t}" is not an enabled agent`));
-    const t = resolveAgentTelegram(a, root);
-    if (!t.enabled || !t.tokenEnv) continue;
-    const owner = tokenOwner.get(t.tokenEnv);
-    if (owner) add(a.id, `telegram.tokenEnv "${t.tokenEnv}" is already used by "${owner}"; one bot token can serve only one agent`);
-    else tokenOwner.set(t.tokenEnv, a.id);
+  const owner = new Map<string, string>();
+  for (const a of [...agents].filter((x) => x.enabled).sort((x, y) => x.id.localeCompare(y.id))) {
+    const url = a.memory.storage.enabled ? a.memory.storage.url : undefined;
+    if (!url) continue;
+    const first = owner.get(url);
+    if (first) (out[a.id] ??= []).push(`memory.storage.url is already used by "${first}"; agents never share storage`);
+    else owner.set(url, a.id);
   }
   return out;
 }
 
-/** Who may delegate to whom, after applying both sides' rules. */
-export function delegationEdges(agents: ResolvedAgent[]): Array<[from: string, to: string]> {
-  const live = agents.filter((a) => a.enabled);
-  const primary = live.find((a) => a.primary);
-  const edges: Array<[string, string]> = [];
-  for (const src of live)
-    for (const dst of live) {
-      if (src.id === dst.id || dst.delegation.acceptsFrom === "none") continue;
-      const asked = src.delegation.canDelegateTo.includes(dst.id) || src.primary;
-      const allowed = dst.delegation.acceptsFrom === "any" || (dst.delegation.acceptsFrom === "primary" && src.id === primary?.id);
-      if (asked && allowed) edges.push([src.id, dst.id]);
-    }
-  return edges;
+const envRefs = (values?: Record<string, string>) => Object.values(values ?? {}).flatMap((v) => (v.startsWith("env:") ? [v.slice(4)] : []));
+
+/**
+ * The .env variable NAMES an agent uses -> where (dotted config paths), for the studio's key list and the engine's reload of an agent whose key
+ * changed. Only what is in use counts: an embedder key while semantic recall is on, a bot token while Telegram is on, a model's key while some
+ * part of the agent uses that model (or its entry names a variable explicitly).
+ */
+export function referencedEnvNames(a: AgentConfig): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (name: string | undefined, where: string) => name && out.set(name, [...(out.get(name) ?? []), where]);
+  const observer = a.memory.observational.model ?? a.model;
+  const used = new Set([a.model, ...(a.memory.observational.enabled ? [observer] : []), ...(a.memory.subconscious.enabled ? [a.memory.subconscious.model ?? observer] : [])]);
+  for (const [key, m] of Object.entries(a.models)) if (used.has(key) || m.apiKeyEnv) add(defaultApiKeyEnv(m), `models.${key}`);
+  if (a.memory.semanticRecall.enabled) add(defaultApiKeyEnv(a.memory.semanticRecall.embedder), "memory.semanticRecall.embedder");
+  if (a.memory.storage.enabled) add(a.memory.storage.authTokenEnv, "memory.storage");
+  if (a.telegram.enabled) add(a.telegram.tokenEnv, "telegram");
+  for (const [n, srv] of Object.entries(a.tools.mcp)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `tools.mcp.${n}`));
+  for (const t of a.triggers) if (t.type === "github-pr") add(t.tokenEnv, `triggers.${t.id}`);
+  return out;
+}
+
+/**
+ * Keys the agent cannot think without that its .env does not set: the models it uses, the embedder (while semantic recall is on) and the remote
+ * storage token. Any of these keeps the agent from loading, with this sentence as the problem. A missing Telegram or GitHub token is not here:
+ * it stops only the bot ("missing-token") or that trigger.
+ */
+export function missingKeys(a: AgentConfig, isSet: (name: string) => boolean): string[] {
+  const observer = a.memory.observational.model ?? a.model;
+  const used = new Set([a.model, ...(a.memory.observational.enabled ? [observer] : []), ...(a.memory.subconscious.enabled ? [a.memory.subconscious.model ?? observer] : [])]);
+  const need = new Map<string, string[]>();
+  const add = (name: string | undefined, where: string) => name && need.set(name, [...(need.get(name) ?? []), where]);
+  for (const key of used) add(defaultApiKeyEnv(a.models[key]!), `models.${key}`);
+  if (a.memory.storage.enabled && a.memory.semanticRecall.enabled) add(defaultApiKeyEnv(a.memory.semanticRecall.embedder), "memory.semanticRecall.embedder");
+  if (a.memory.storage.enabled) add(a.memory.storage.authTokenEnv, "memory.storage");
+  return [...need].filter(([name]) => !isSet(name)).map(([name, where]) => `${name} is not set in this agent's keys (${where.join(", ")})`);
+}
+
+/** What the agent's behaviour depends on in its .env. The engine hashes these VALUES (fingerprints) into the agent's version, so a rotated key rebuilds it. */
+export const agentEnvNames = (a: AgentConfig): string[] => [...referencedEnvNames(a).keys()].sort();
+
+/**
+ * The smallest valid config: one model and nothing else. A key it leaves out means the schema default (memory on, the workspace tool), which is
+ * what the builder shows for a hand-written config that leaves it out too.
+ */
+export function newAgentConfig(input: { id: string; name: string; role?: string; description?: string; model: ModelInput }): AgentConfigInput {
+  return { schemaVersion: AGENT_SCHEMA_VERSION, id: input.id, name: input.name, role: input.role ?? "assistant", description: input.description ?? "", models: { main: input.model }, model: "main" };
+}
+
+/**
+ * What "New agent" writes: the model it cannot answer without and its instructions, with every other part switched off, so the canvas starts
+ * with the agent and its model and the person connects the rest (storage, memory blocks, soul, tools, Telegram, triggers) as they want.
+ * Written out in full rather than left to the defaults, because the defaults turn memory and the workspace on.
+ */
+export function startingAgentConfig(input: Parameters<typeof newAgentConfig>[0]): AgentConfigInput {
+  return {
+    ...newAgentConfig(input),
+    memory: {
+      storage: { enabled: false },
+      lastMessages: { enabled: false },
+      workingMemory: { enabled: false },
+      semanticRecall: { enabled: false },
+      observational: { enabled: false },
+      subconscious: { enabled: false },
+    },
+    tools: { builtin: [] },
+    skills: { enabled: [] },
+  };
 }
 
 /* ------------------------------------------------------------------------------------------------ */
@@ -350,21 +456,20 @@ export type AgentStatus = "loaded" | "stale" | "invalid" | "disabled" | "offline
 
 /**
  * off:           this agent has no bot (telegram.enabled is false).
- * missing-token: enabled, but the .env variable is not set (or not named yet).
+ * missing-token: enabled, but the token variable is not set in the agent's .env.
  * starting:      adapter created, first getUpdates not confirmed.
  * polling:       the bot is live; `username` is its @handle.
- * error:         token rejected by Telegram, or another poller holds it (409); `error` says which.
+ * error:         token rejected by Telegram, another poller holds it (409), or another agent has the same token; `error` says which.
  */
 export type TelegramState = "off" | "missing-token" | "starting" | "polling" | "error";
-/** `restartRequired`: the primary's bot is built once at boot, so a change to its root token / allow-list applies only after an engine restart. */
-export type TelegramRuntime = { state: TelegramState; username?: string; error?: string; restartRequired?: boolean };
+export type TelegramRuntime = { state: TelegramState; username?: string; error?: string };
 
 /**
  * idle:          waiting for the next cron time / poll.
  * running:       the agent is working on a fired event right now.
  * error:         the last poll or run failed; `error` says why (the trigger keeps trying).
  * disabled:      trigger or agent has enabled=false.
- * missing-token: github-pr whose tokenEnv is not set in .env.
+ * missing-token: github-pr whose tokenEnv is not set in the agent's .env.
  */
 export type TriggerState = "idle" | "running" | "error" | "disabled" | "missing-token";
 
@@ -395,13 +500,16 @@ export type AgentRuntime = {
   /** One entry per trigger in the agent's config. */
   triggers?: TriggerRuntime[];
   problems: string[];
-  /** sha256 of the normalized config + instructions text currently registered. */
+  /** Hash of the resolved config plus fingerprints of the .env values it uses, currently registered. */
   loadedHash?: string;
   loadedAt?: string;
+  /** MCP server name -> why it failed to start. */
   mcpErrors?: Record<string, string>;
 };
 
-export type AgentSummary = Pick<ResolvedAgent, "id" | "name" | "role" | "description" | "enabled" | "primary" | "modelKey" | "telegram"> & {
+export type AgentSummary = Pick<AgentConfig, "id" | "name" | "role" | "description" | "enabled"> & {
+  modelKey: string;
+  telegram: Pick<AgentConfig["telegram"], "enabled" | "allowedUserIds">;
   runtime: AgentRuntime;
 };
 
@@ -415,7 +523,7 @@ export type GetAgentResponse = {
   /** Null when the config is invalid. */
   resolved: ResolvedAgent | null;
   instructionsText: string | null;
-  /** The agent's own soul file (config.soul.file) when it exists, else null. Written back through UpdateAgentConfigRequest.soulText. */
+  /** The agent's soul file (config.soul.file) when it exists, else null. Written back through UpdateAgentConfigRequest.soulText. */
   soulText: string | null;
   runtime: AgentRuntime;
   /** Opaque version for optimistic concurrency (hash of the file bytes). */
@@ -425,11 +533,22 @@ export type GetAgentResponse = {
 /** Engine GET /eigen/agents/:id: what is running (the web app reads the files itself). `resolved` is the last good version for a stale agent. */
 export type GetAgentRuntimeResponse = { id: string; runtime: AgentRuntime; resolved: ResolvedAgent | null };
 
-/** POST /api/agents/:id/config. `etag` from the GET; omit to force. `instructionsText` writes the instructions file too. */
+/** POST /api/agents: creates ~/.eigen/agents/<id>/ (config.json from newAgentConfig, instructions.md, empty .env, skills/, sandbox/). 409 if the id exists. */
+export const CreateAgentRequest = z.object({
+  id: AgentId,
+  name: z.string().min(1).max(64),
+  role: z.string().min(1).max(40).optional(),
+  description: z.string().max(1000).optional(),
+  model: ModelSchema,
+  instructionsText: z.string().max(100_000).optional(),
+});
+export type CreateAgentRequest = z.input<typeof CreateAgentRequest>;
+
+/** POST /api/agents/:id/config. `etag` from the GET; omit to force. `instructionsText` / `soulText` write those files too. */
 export const UpdateAgentConfigRequest = z.object({
   config: z.unknown(),
-  instructionsText: z.string().optional(),
-  /** Writes the agent's own soul file (config.soul.file, inside the agent folder). Applies on the agent's next message; no reload needed. */
+  instructionsText: z.string().max(100_000).optional(),
+  /** Writes the agent's soul file (config.soul.file, inside the agent folder). Applies on the agent's next message; no reload needed. */
   soulText: z.string().max(100_000).optional(),
   etag: z.string().optional(),
 });
@@ -442,57 +561,16 @@ export type UpdateAgentConfigRequest = z.infer<typeof UpdateAgentConfigRequest>;
  */
 export type UpdateAgentConfigResponse = { ok: true; etag: string } | { ok: false; issues?: string[]; etag?: string };
 
-/** GET /api/root, PUT /api/root. The root ~/.eigen/config.json as the file holds it (no defaults filled in), so a round trip never rewrites what you did not touch. */
-export type GetRootConfigResponse = { config: Record<string, unknown>; etag: string; parseError?: string };
-export type UpdateRootConfigRequest = { config: unknown; etag?: string };
-/** Same statuses as the agent write: 200 ok, 400 issues (schema, or a model / MCP server some agent still uses), 409 changed since your GET. */
-export type UpdateRootConfigResponse = UpdateAgentConfigResponse;
-
 /**
- * Secrets are WRITE-ONLY: the studio can set or remove a value in ~/.eigen/.env, and can see whether a name is set, but no
- * endpoint ever returns a value. Config files only ever hold the NAME of the variable.
+ * Secrets are WRITE-ONLY and per agent: the studio can set or remove a value in ~/.eigen/agents/<id>/.env and can see whether a name is set,
+ * but no endpoint ever returns a value. Config files only ever hold the NAME of the variable.
  */
 export type SecretStatus = { name: string; set: boolean; usedBy: string[] };
-/** GET /api/secrets: every env name the configs reference (not every line of .env). */
+/** GET /api/agents/:id/secrets: every name the agent's config references (referencedEnvNames), plus any other name set in its .env (usedBy: []). */
 export type ListSecretsResponse = { secrets: SecretStatus[] };
-/** PUT /api/secrets/:name */
+/** PUT /api/agents/:id/secrets/:name (DELETE removes it). */
 export const SetSecretRequest = z.object({ value: z.string().min(1).max(4096) });
 export type SetSecretRequest = z.infer<typeof SetSecretRequest>;
-
-const envRefs = (values?: Record<string, string>) => Object.values(values ?? {}).flatMap((v) => (v.startsWith("env:") ? [v.slice(4)] : []));
-
-/**
- * The env variable NAMES one agent's behaviour depends on: its model key, its bot token, the embedder key, the keys of the
- * models its memory uses, and any `env:NAME` in its private MCP servers. The registry hashes the VALUES of these names into the
- * agent's version, so a key rotated in `.env` rebuilds exactly the agents that use it.
- */
-export function agentEnvNames(r: ResolvedAgent, root: Pick<Config, "models">): string[] {
-  const names = new Set<string>();
-  const add = (n: string | undefined) => n && names.add(n);
-  add(r.model.apiKeyEnv);
-  if (r.telegram.enabled) add(r.telegram.tokenEnv);
-  add(r.memory.embedder.apiKeyEnv);
-  for (const key of [r.memory.observational.model, r.memory.knowledge.model]) add(key ? root.models[key]?.apiKeyEnv : undefined);
-  for (const srv of Object.values(r.mcp.own)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach(add);
-  for (const t of r.triggers) if (t.enabled && t.type === "github-pr") add(t.tokenEnv);
-  return [...names].sort();
-}
-
-/** Env variable names the configs point at -> where they are used. Drives the studio's "API keys" panel and the engine's reload of agents whose key changed. */
-export function referencedEnvNames(root: Config, agents: AgentConfig[] = []): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  const add = (name: string | undefined, usedBy: string) => name && out.set(name, [...(out.get(name) ?? []), usedBy]);
-  add(root.telegram.tokenEnv, "telegram (root bot)");
-  for (const [k, m] of Object.entries(root.models)) add(m.apiKeyEnv, `models.${k}`);
-  add(root.memory.embedder.apiKeyEnv, "memory.embedder");
-  for (const [n, srv] of Object.entries(root.mcpServers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `mcpServers.${n}`));
-  for (const a of agents) {
-    if (a.telegram.tokenEnv) add(a.telegram.tokenEnv, `agents.${a.id}.telegram`);
-    for (const t of a.triggers) if (t.type === "github-pr") add(t.tokenEnv, `agents.${a.id}.triggers.${t.id}`);
-    for (const [n, srv] of Object.entries(a.tools.mcp.servers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `agents.${a.id}.mcp.${n}`));
-  }
-  return out;
-}
 
 /** GET /api/agents/events (SSE). */
 export type AgentEvent =
@@ -500,25 +578,30 @@ export type AgentEvent =
   | { type: "agent.removed"; id: string }
   | { type: "agent.error"; id: string; problems: string[]; stale: boolean }
   | { type: "fleet.changed"; rev: string }
-  /** A bot started, stopped, failed, or learned its @username. Sent for the primary too. */
+  /** A bot started, stopped, failed, or learned its @username. */
   | { type: "agent.telegram"; id: string; telegram: TelegramRuntime }
   /** A trigger changed state or finished a run (`trigger.lastRun`). */
   | { type: "agent.trigger"; id: string; trigger: TriggerRuntime };
 
-/** Engine POST /eigen/telegram/check, studio POST /api/telegram/check: calls getMe with the token in that env var. Never returns the token. */
+/** Engine POST /eigen/agents/:id/telegram/check, studio POST /api/agents/:id/telegram/check: getMe with the token in that variable of the agent's .env. Never returns the token. */
 export const TelegramCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME) });
 export type TelegramCheckRequest = z.infer<typeof TelegramCheckRequest>;
 export type TelegramCheckResponse = { ok: boolean; username?: string; error?: string };
 
-/** Engine POST /eigen/models/:key/test, studio POST /api/models/:key/test: one tiny prompt to that root model, 20s timeout. Errors are redacted. */
+/** Engine POST /eigen/agents/:id/models/:key/test, studio POST /api/agents/:id/models/:key/test: one tiny prompt to that model of the agent, with the agent's key, 20 s timeout. Errors are redacted. */
 export type ModelTestResponse = { ok: boolean; ms: number; reply?: string; error?: string };
 
+/** Engine POST /eigen/agents/:id/github/check, studio POST /api/agents/:id/github/check: can the token in that variable of the agent's .env read that repo's pull requests? */
+export const GithubCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME), repo: z.string().regex(GITHUB_REPO) });
+export type GithubCheckRequest = z.infer<typeof GithubCheckRequest>;
+export type GithubCheckResponse = { ok: boolean; login?: string; openPulls?: number; error?: string };
+
 /* ------------------------------------------------------------------------------------------------ */
-/* Skill library, shared soul, triggers: DTOs.                                                        */
-/* The studio reads and writes ~/.eigen files itself (lib/store.ts); only runtime state comes from the engine. */
+/* Skills (per agent), triggers, chat: DTOs.                                                          */
+/* The studio reads and writes agent folders itself (lib/store.ts); only runtime state comes from the engine. */
 /* ------------------------------------------------------------------------------------------------ */
 
-/** user: created in the studio or by hand under ~/.eigen/skills/<slug>/ (editable). clawhub: installed under @owner/slug (shown read-only). */
+/** user: created in the studio or by hand under the agent's skills/<slug>/ (editable). clawhub: installed under @owner/slug (shown read-only). */
 export type SkillOrigin = "user" | "clawhub";
 export type SkillSummary = {
   slug: string;
@@ -527,26 +610,24 @@ export type SkillSummary = {
   origin: SkillOrigin;
   /** Why Mastra would skip this skill (bad or missing frontmatter, name does not match the folder, ...). The editor shows it. */
   problem?: string;
-  /** Ids of the agents whose `skills.inherit` lists it by name (agents on "all" are not counted). */
-  usedBy: string[];
+  /** Whether the agent loads it (skills.enabled is "all" or lists it). */
+  enabled: boolean;
 };
-/** GET /api/skills */
+/** GET /api/agents/:id/skills */
 export type ListSkillsResponse = { skills: SkillSummary[] };
-/** GET /api/skills/:slug (slug is URL-encoded: "@owner/slug" has a slash). `files` are the other files in the folder, names only, read-only here. */
+/** GET /api/agents/:id/skills/:slug (slug URL-encoded: "@owner/slug" has a slash). `files` are the other files in the folder, names only. */
 export type GetSkillResponse = { slug: string; text: string; etag: string; origin: SkillOrigin; files: string[]; problem?: string };
-/** PUT /api/skills/:slug: replaces SKILL.md. 200 { ok, etag } | 400 { ok:false, issues } | 409 changed since GET | 403 for a clawhub skill. */
+/** PUT /api/agents/:id/skills/:slug: replaces SKILL.md. 200 { ok, etag } | 400 { ok:false, issues } | 409 changed since GET | 403 for a clawhub skill. DELETE moves it to the agent's .trash/. */
 export const WriteSkillRequest = z.object({ text: z.string().min(1).max(100_000), etag: z.string().optional() });
 export type WriteSkillRequest = z.infer<typeof WriteSkillRequest>;
-/** POST /api/skills: scaffolds ~/.eigen/skills/<slug>/SKILL.md with frontmatter (name = slug) and, when `text` is omitted, a starter body. 409 if the slug exists. */
-export const CreateSkillRequest = z.object({ slug: SkillSlug.refine((s) => !s.startsWith("@"), "new skills cannot use @owner/ (that is ClawHub's layout)"), description: z.string().min(1).max(1024), text: z.string().max(100_000).optional() });
+/** POST /api/agents/:id/skills: scaffolds skills/<slug>/SKILL.md with frontmatter (name = slug) and, when `text` is omitted, a starter body. 409 if the slug exists. */
+export const CreateSkillRequest = z.object({
+  slug: SkillSlug.refine((s) => !s.startsWith("@"), "new skills cannot use @owner/ (that is ClawHub's layout)"),
+  description: z.string().min(1).max(1024),
+  text: z.string().max(100_000).optional(),
+});
 export type CreateSkillRequest = z.infer<typeof CreateSkillRequest>;
 export type SkillWriteResponse = { ok: true; etag: string; slug?: string } | { ok: false; issues?: string[]; etag?: string };
-
-/** GET /api/soul, PUT /api/soul: the shared ~/.eigen/SOUL.md that every agent on `soul.source: "shared"` reads on each turn. */
-export type GetSharedSoulResponse = { text: string; etag: string };
-export const WriteSharedSoulRequest = z.object({ text: z.string().max(100_000), etag: z.string().optional() });
-export type WriteSharedSoulRequest = z.infer<typeof WriteSharedSoulRequest>;
-export type SharedSoulWriteResponse = { ok: true; etag: string } | { ok: false; issues?: string[]; etag?: string };
 
 /** Engine GET /eigen/agents/:id/triggers/runs?limit=50, studio GET /api/agents/:id/triggers/runs: newest first, at most 200. */
 export type ListTriggerRunsResponse = { runs: TriggerRun[] };
@@ -556,28 +637,29 @@ export type ListTriggerRunsResponse = { runs: TriggerRun[] };
  * Resolves when the run has finished (max 5 minutes).
  */
 export type RunTriggerResponse = { ok: boolean; run?: TriggerRun; error?: string };
-/** Engine POST /eigen/github/check, studio POST /api/github/check: can the token in that env var read that repo's pull requests? Never returns the token. */
-export const GithubCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME), repo: z.string().regex(GITHUB_REPO) });
-export type GithubCheckRequest = z.infer<typeof GithubCheckRequest>;
-export type GithubCheckResponse = { ok: boolean; login?: string; openPulls?: number; error?: string };
 
-/** Engine GET /eigen/chat/:id/:session, studio GET /api/chat/:agentId?session=: the session's earlier messages (AI SDK UI messages), newest 100. `memory` says whose memory the chat shares. */
-export type ChatHistoryResponse = { messages: unknown[]; model: string; memory: { scope: "shared" | "isolated"; telegramUserId?: number } };
+/**
+ * Engine GET /eigen/chat/:id/:session, studio GET /api/chat/:agentId?session=: the session's earlier messages (AI SDK UI messages), newest 100.
+ * The studio chat shares the agent's memory of its first allowed Telegram user (`telegramUserId`), so working memory is the same person on both.
+ */
+export type ChatHistoryResponse = { messages: unknown[]; model: string; memory: { telegramUserId?: number } };
 
 /* ------------------------------------------------------------------------------------------------ */
-/* Topology (React Flow). Positions are NOT here: they live in data/topology-layout.json.            */
+/* Fleet view (React Flow). Agents are separate islands: an agent, its bot and its MCP servers. There  */
+/* are no edges between agents. Positions are NOT here: they live in ~/.eigen/engine/layout.json.     */
 /* ------------------------------------------------------------------------------------------------ */
 
 export type TopologyNode =
-  | { id: `channel:${string}`; type: "channel"; data: { channel: "telegram"; routesTo: string; tokenEnv?: string; state: TelegramState; username?: string } }
+  | { id: `channel:${string}`; type: "channel"; data: { channel: "telegram"; agentId: string; state: TelegramState; username?: string } }
   | { id: `agent:${string}`; type: "agent"; data: AgentSummary & { builtinTools: string[] } }
-  | { id: `mcp:${string}`; type: "mcp"; data: { name: string; owner: "root" | string; trusted: boolean; error?: string } };
+  | { id: `mcp:${string}`; type: "mcp"; data: { name: string; agentId: string; trusted: boolean; error?: string } };
 
 export type TopologyEdge = {
   id: string;
   source: TopologyNode["id"];
   target: TopologyNode["id"];
-  type: "routes" | "delegates" | "uses";
+  /** routes: an agent's bot -> the agent. uses: the agent -> one of its MCP servers. Never between two agents. */
+  type: "routes" | "uses";
   label?: string;
 };
 
@@ -585,50 +667,27 @@ export type Topology = { nodes: TopologyNode[]; edges: TopologyEdge[] };
 
 export const agentNodeId = (id: string) => `agent:${id}` as const;
 export const telegramNodeId = (agentId: string) => `channel:telegram:${agentId}` as const;
-export const mcpNodeId = (name: string, owner = "root") => (owner === "root" ? (`mcp:${name}` as const) : (`mcp:${owner}/${name}` as const));
+export const mcpNodeId = (agentId: string, name: string) => `mcp:${agentId}/${name}` as const;
 
-/** Builds the graph from resolved agents. Agents that failed to resolve still appear (as summaries) with no edges. */
-export function buildTopology(summaries: AgentSummary[], resolved: ResolvedAgent[], root: Pick<Config, "mcpServers">, mcpErrors: Record<string, string> = {}): Topology {
+/** Builds the fleet graph. Agents that failed to resolve still appear (as summaries) with nothing attached. */
+export function buildTopology(summaries: AgentSummary[], resolved: ResolvedAgent[]): Topology {
   const nodes: TopologyNode[] = [];
   const edges: TopologyEdge[] = [];
   const byId = new Map(resolved.map((r) => [r.id, r]));
-
   for (const s of summaries) {
     const r = byId.get(s.id);
-    nodes.push({ id: agentNodeId(s.id), type: "agent", data: { ...s, builtinTools: r?.builtinTools ?? [] } });
+    nodes.push({ id: agentNodeId(s.id), type: "agent", data: { ...s, builtinTools: r?.tools.builtin ?? [] } });
     if (!r?.enabled) continue;
     if (r.telegram.enabled) {
       const t = s.runtime.telegram;
-      nodes.push({ id: telegramNodeId(r.id), type: "channel", data: { channel: "telegram", routesTo: r.id, tokenEnv: r.telegram.tokenEnv, state: t?.state ?? "off", username: t?.username } });
+      nodes.push({ id: telegramNodeId(r.id), type: "channel", data: { channel: "telegram", agentId: r.id, state: t?.state ?? "off", username: t?.username } });
       edges.push({ id: `routes:telegram->${r.id}`, source: telegramNodeId(r.id), target: agentNodeId(r.id), type: "routes" });
     }
-    for (const name of r.mcp.inherited) edges.push({ id: `uses:${r.id}->${name}`, source: agentNodeId(r.id), target: mcpNodeId(name), type: "uses" });
-    for (const [name, srv] of Object.entries(r.mcp.own)) {
-      nodes.push({ id: mcpNodeId(name, r.id), type: "mcp", data: { name, owner: r.id, trusted: srv.trusted, error: mcpErrors[`${r.id}/${name}`] } });
-      edges.push({ id: `uses:${r.id}->${r.id}/${name}`, source: agentNodeId(r.id), target: mcpNodeId(name, r.id), type: "uses" });
+    for (const [name, srv] of Object.entries(r.tools.mcp)) {
+      if (!srv.enabled) continue;
+      nodes.push({ id: mcpNodeId(r.id, name), type: "mcp", data: { name, agentId: r.id, trusted: srv.trusted, error: s.runtime.mcpErrors?.[name] } });
+      edges.push({ id: `uses:${r.id}->${name}`, source: agentNodeId(r.id), target: mcpNodeId(r.id, name), type: "uses" });
     }
   }
-
-  for (const [name, srv] of Object.entries(root.mcpServers))
-    if (srv.enabled) nodes.push({ id: mcpNodeId(name), type: "mcp", data: { name, owner: "root", trusted: srv.trusted, error: mcpErrors[name] } });
-
-  for (const [src, dst] of delegationEdges(resolved)) edges.push({ id: `delegates:${src}->${dst}`, source: agentNodeId(src), target: agentNodeId(dst), type: "delegates" });
-
   return { nodes, edges };
 }
-
-/**
- * What `npm run setup` / the migration writes for the existing single agent.
- * Its instructions stay in ~/.eigen/prompts/system.md (one source of truth, so editing the primary's prompt in the studio edits the file it always used).
- */
-export const DEFAULT_PRIMARY: AgentConfigInput = {
-  id: "eigen",
-  name: "Eigen",
-  role: "assistant",
-  description: "The user's personal assistant. Talks to the user on Telegram and delegates specialised work to other agents.",
-  primary: true,
-  instructions: { file: "../../prompts/system.md" },
-  tools: { builtin: ["workspace", "schedule", "skills"], mcp: { inherit: "all" } },
-  memory: { scope: "shared" },
-  delegation: { acceptsFrom: "none" },
-};

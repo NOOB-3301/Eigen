@@ -1,13 +1,17 @@
+/**
+ * The workspace tool of one agent: read/write/edit files and run bash in its sandbox, and load its skills. Skills come from three places,
+ * all read-only to the agent's tools: its library (skills/, filtered by `skills.enabled`), the ones it installed or wrote in its sandbox
+ * (sandbox/skills/), and the engine's built-in skills (engine/defaults/skills).
+ */
 import { existsSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { LocalFilesystem, Workspace, WORKSPACE_TOOLS } from "@mastra/core/workspace";
 import { appendAudit } from "../audit.ts";
 import { snapshotGroundRules } from "../ground-rules.ts";
-import type { Config } from "../config.ts";
-import type { HomePaths } from "../home.ts";
-import { SkillSlug } from "../schema.ts";
+import type { AgentPaths } from "../home.ts";
+import { SkillSlug, type ResolvedAgent } from "../schema.ts";
 import { makeSandbox, refreshSkillEnv, resolveIsolation } from "../sandbox.ts";
-import { reconcileSkills } from "../skills.ts";
+import { builtinSkillsDir, reconcileSkills } from "../skills.ts";
 import { needsApproval } from "./approval.ts";
 
 const { FILESYSTEM: FS, SANDBOX } = WORKSPACE_TOOLS;
@@ -38,29 +42,27 @@ export const touchesGroundRules = ({ workspaceToolName, input }: Call) =>
     : ([FS.WRITE_FILE, FS.EDIT_FILE] as string[]).includes(workspaceToolName) && /^\/?groundrules\.md$/.test(String(input.path ?? ""));
 
 /** Returns a reason to refuse a bash call, or undefined to allow it. */
-export function vetCall(p: HomePaths, cfg: Config, { workspaceToolName, input }: Call) {
+export function vetCall(p: Pick<AgentPaths, "sandboxDir">, policy: Pick<ResolvedAgent["sandbox"], "maxTimeoutSec">, { workspaceToolName, input }: Call) {
   if (workspaceToolName !== SANDBOX.EXECUTE_COMMAND) return undefined;
   if (input.background) return "Background processes are not available; run the command in the foreground.";
-  if (Number(input.timeout) > cfg.sandbox.maxTimeoutSec) return `timeout is capped at ${cfg.sandbox.maxTimeoutSec} seconds.`;
+  if (Number(input.timeout) > policy.maxTimeoutSec) return `timeout is capped at ${policy.maxTimeoutSec} seconds.`;
   if (typeof input.cwd === "string" && !inside(p.sandboxDir, resolve(p.sandboxDir, input.cwd))) return "cwd must stay inside the sandbox.";
   return undefined;
 }
 
-/** Which skills from ~/.eigen/skills an agent can load: all, none, or exactly the named ones ("pdf", "@owner/slug"). Its own sandbox/skills are visible in every case. */
-export type SkillSelection = "all" | "none" | string[];
+/** Which of its library skills an agent loads: all, or exactly the named ones ("pdf", "@owner/slug"). */
+export type SkillSelection = ResolvedAgent["skills"]["enabled"];
 
 const posix = (path: string) => path.split(sep).join("/");
 
 /**
- * The paths, relative to ~/.eigen, that Mastra scans for skills. A path ending in SKILL.md is read as that one skill; "**" also finds
- * ClawHub's skills/@owner/slug layout. A name that is not a slug is dropped: in a path it would be a glob or a "..".
- * The sandbox part follows `p`, so an agent with its own sandbox sees ITS sandbox/skills, not the shared one.
+ * The absolute globs Mastra scans for skills. A path ending in SKILL.md is read as that one skill; "**" also finds ClawHub's @owner/slug layout.
+ * A name that is not a slug is dropped: in a path it would be a glob or a "..".
  */
-export function skillPaths(p: HomePaths, selection: SkillSelection): string[] {
-  const library = posix(relative(p.home, p.userSkillsDir));
-  const own = posix(relative(p.home, p.sandboxSkillsDir));
-  const shared = selection === "all" ? [`${library}/**/SKILL.md`] : Array.isArray(selection) ? selection.filter((n) => SkillSlug.safeParse(n).success).map((n) => `${library}/${n}/SKILL.md`) : [];
-  return [...shared, `${own}/**/SKILL.md`];
+export function skillPaths(p: Pick<AgentPaths, "skillsDir" | "sandboxSkillsDir">, selection: SkillSelection, builtin: string | undefined): string[] {
+  const library = posix(p.skillsDir);
+  const own = selection === "all" ? [`${library}/**/SKILL.md`] : selection.filter((n) => SkillSlug.safeParse(n).success).map((n) => `${library}/${n}/SKILL.md`);
+  return [...own, `${posix(p.sandboxSkillsDir)}/**/SKILL.md`, ...(builtin ? [`${posix(builtin)}/**/SKILL.md`] : [])];
 }
 
 /**
@@ -74,33 +76,37 @@ export async function refreshSkills(workspace: Workspace) {
   await view?.refresh();
 }
 
+export type WorkspaceAgent = Pick<ResolvedAgent, "id" | "sandbox" | "skills">;
 export type WorkspaceOptions = {
-  /** A function is read on every turn (the primary follows edits to its config without a rebuild); a value is fixed for this workspace. */
-  skills?: SkillSelection | (() => SkillSelection);
+  /** Overrides the isolation the policy resolves to (tests use "none"). */
+  isolation?: ReturnType<typeof resolveIsolation>;
   log?: (msg: string) => void;
+  /** The built-in skills folder; null: none; undefined: found from the engine's install. */
+  builtinSkills?: string | null;
 };
 
-export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsolation(cfg.sandbox.isolation), id = "eigen", { skills = "all", log = () => undefined }: WorkspaceOptions = {}) {
-  const audit = (entry: Record<string, unknown>) => appendAudit(p.auditFile, entry);
-  const sandbox = makeSandbox(p, cfg, isolation);
+export function makeWorkspace(r: WorkspaceAgent, p: AgentPaths, { isolation = resolveIsolation(r.sandbox.isolation), log = () => undefined, builtinSkills: found }: WorkspaceOptions = {}) {
+  const builtinSkills = found === null ? undefined : (found ?? builtinSkillsDir());
+  const audit = (entry: Record<string, unknown>) => appendAudit(join(p.dataDir, "audit.jsonl"), entry);
+  const sandbox = makeSandbox(p, r.sandbox, isolation, log, builtinSkills ?? null);
   const reported = new Set<string>(); // named skills already logged as missing
   const workspace: Workspace = new Workspace({
-    id,
-    name: id,
+    id: `agent-${r.id}`,
+    name: r.id,
     filesystem: new LocalFilesystem({ basePath: p.sandboxDir }),
     sandbox,
-    // The skills this agent selected from skills/ plus its own sandbox/skills/, read-only.
-    skillSource: new LocalFilesystem({ basePath: p.home, readOnly: true }),
+    // Read-only, and confined to the three skill folders: the skill loader can never read the agent's .env or another agent's folder.
+    skillSource: new LocalFilesystem({ basePath: p.skillsDir, readOnly: true, allowedPaths: [p.sandboxSkillsDir, ...(builtinSkills ? [builtinSkills] : [])] }),
     skills: () => {
-      const wanted = typeof skills === "function" ? skills() : skills;
-      if (!Array.isArray(wanted)) return skillPaths(p, wanted);
+      const wanted = r.skills.enabled;
+      if (wanted === "all") return skillPaths(p, wanted, builtinSkills);
       // A named skill can be deleted in the studio at any time: ignore it, say so once, and pick it up again if it comes back.
-      const present = wanted.filter((n) => existsSync(join(p.userSkillsDir, n, "SKILL.md")));
+      const present = wanted.filter((n) => existsSync(join(p.skillsDir, n, "SKILL.md")));
       const gone = wanted.filter((n) => !present.includes(n));
-      gone.filter((n) => !reported.has(n)).forEach((n) => log(`${id}: skill "${n}" is not in the skills folder, ignored`));
+      gone.filter((n) => !reported.has(n)).forEach((n) => log(`${r.id}: skill "${n}" is not in its skills folder, ignored`));
       reported.clear();
       gone.forEach((n) => reported.add(n));
-      return skillPaths(p, present);
+      return skillPaths(p, present, builtinSkills);
     },
     tools: {
       enabled: false,
@@ -115,7 +121,7 @@ export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsol
       },
       hooks: {
         beforeToolCall: ({ toolName, workspaceToolName, input }) => {
-          const reason = vetCall(p, cfg, { workspaceToolName, input: input as Record<string, unknown> });
+          const reason = vetCall(p, r.sandbox, { workspaceToolName, input: input as Record<string, unknown> });
           if (!reason) return;
           audit({ tool: toolName, input, outcome: "refused", reason });
           return { proceed: false, output: reason };

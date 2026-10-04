@@ -3,35 +3,34 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { SWRConfig, useSWRConfig } from "swr";
 import { AnimatePresence, motion } from "motion/react";
 import { Toaster, toast } from "sonner";
-import { AlertTriangle, ArrowLeft, Plus, Search, Settings as SettingsIcon } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Plus, Search } from "lucide-react";
 import type { AgentEvent, GetAgentResponse } from "@eigen/engine/schema";
-import type { FleetResponse, Layout, RootInfo } from "@/lib/types";
-import { keys, useFleet, useLayout, useRoot } from "@/lib/client/api";
+import type { FleetResponse, Layout } from "@/lib/types";
+import { keys, useFleet, useLayout } from "@/lib/client/api";
 import { applyTelegramToAgent, applyTelegramToFleet, awaitingReload, fleetHasBot, onAgentEvent, useEventStream } from "@/lib/client/events";
 import { cn } from "@/lib/cn";
 import { Button, Kbd, Modal, softSpring } from "@/components/ui";
 import { ThemeToggle, useTheme } from "@/components/theme";
 import { Canvas, type CanvasApi } from "@/components/canvas/flow";
 import { CABLES } from "@/components/canvas/edges";
-import { Inspector } from "@/components/inspector/inspector";
 import { Builder } from "@/components/builder/builder";
 import { NewAgentDialog } from "@/components/new-agent-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import { AgentList } from "@/components/agent-list";
-import { SettingsDialog, type SettingsSection } from "@/components/settings/settings-dialog";
+import { SummaryCard } from "@/components/fleet/summary-card";
 
-/** `initialBuilder`: ?view=builder&agent=<id>. `initialAgent`: ?agent=<id> alone opens that agent's inspector. */
-type Props = { initialFleet: FleetResponse; initialRoot?: RootInfo; initialLayout: Layout; initialSettings?: SettingsSection; initialBuilder?: string; initialAgent?: string };
+/** `initialBuilder`: ?view=builder&agent=<id>. `initialAgent`: ?agent=<id> alone selects that agent on the fleet view (its summary card). */
+type Props = { initialFleet: FleetResponse; initialLayout: Layout; initialBuilder?: string; initialAgent?: string };
 
-export function Studio({ initialFleet, initialRoot, initialLayout, initialSettings, initialBuilder, initialAgent }: Props) {
+export function Studio({ initialFleet, initialLayout, initialBuilder, initialAgent }: Props) {
   return (
-    <SWRConfig value={{ fallback: { [keys.fleet]: initialFleet, [keys.root]: initialRoot, [keys.layout]: initialLayout } }}>
-      <StudioInner initialEngine={initialFleet.engine} initialSettings={initialSettings} initialBuilder={initialBuilder} initialAgent={initialAgent} />
+    <SWRConfig value={{ fallback: { [keys.fleet]: initialFleet, [keys.layout]: initialLayout } }}>
+      <StudioInner initialEngine={initialFleet.engine} initialBuilder={initialBuilder} initialAgent={initialAgent} />
     </SWRConfig>
   );
 }
 
-/** The builder lives in the URL (?agent=<id>&view=builder), so it can be linked, reloaded and left with the back button. Other params (?settings=) are kept. */
+/** The builder lives in the URL (?agent=<id>&view=builder), so it can be linked, reloaded and left with the back button. Other params are kept. */
 function urlWithBuilder(id: string | null) {
   const url = new URL(window.location.href);
   if (id) {
@@ -55,9 +54,8 @@ const useMedia = (q: string) =>
     () => false,
   );
 
-function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAgent }: { initialEngine: "online" | "offline"; initialSettings?: SettingsSection; initialBuilder?: string; initialAgent?: string }) {
+function StudioInner({ initialEngine, initialBuilder, initialAgent }: { initialEngine: "online" | "offline"; initialBuilder?: string; initialAgent?: string }) {
   const { data: fleet } = useFleet();
-  const { data: root } = useRoot();
   const { data: layout } = useLayout();
   const { mutate } = useSWRConfig();
   const theme = useTheme();
@@ -71,13 +69,12 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
   const [leave, setLeave] = useState<{ next: string | null } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
-  const [settings, setSettings] = useState<{ open: boolean; section?: SettingsSection }>({ open: !!initialSettings, section: initialSettings });
   const canvas = useRef<CanvasApi>(null);
   const pendingFocus = useRef<string | null>(null);
 
   const engine = stream.connected ? stream.engine : (fleet?.engine ?? initialEngine);
   const engineOnline = engine === "online";
-  const inspectorWidth = phone ? 0 : wide ? 480 : 420;
+  const cardWidth = phone ? 0 : wide ? 380 : 352;
 
   // When the engine comes or goes, statuses change wholesale: refetch.
   useEffect(() => {
@@ -119,7 +116,6 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
       if (ev.type === "agent.trigger") return;
       void mutate(keys.fleet);
       if (ev.type === "fleet.changed") {
-        void mutate(keys.root);
         void mutate((k) => typeof k === "string" && k.startsWith("/api/agents/"), undefined, { revalidate: true });
         return;
       }
@@ -141,7 +137,7 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
     };
   }, [mutate]);
 
-  // Close the inspector if its agent disappears (trashed elsewhere); focus agents that just got created.
+  // Close the summary card if its agent disappears (trashed elsewhere); focus agents that just got created.
   useEffect(() => {
     if (!fleet) return;
     if (selected && !fleet.agents.some((a) => a.id === selected) && pendingFocus.current !== selected) setSelected(null);
@@ -156,20 +152,9 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
   const close = useCallback(() => {
     const id = selected;
     setSelected(null);
-    // Return focus to the node the drawer was opened from.
+    // Return focus to the node the card was opened from.
     if (id) setTimeout(() => document.querySelector<HTMLElement>(`.react-flow__node[data-id="agent:${id}"]`)?.focus(), 50);
   }, [selected]);
-
-  const openSettings = useCallback((section?: SettingsSection) => setSettings({ open: true, section }), []);
-  const closeSettings = useCallback(() => {
-    setSettings((s) => ({ ...s, open: false }));
-    // Drop a ?settings= deep link so a reload does not reopen the dialog.
-    const url = new URL(window.location.href);
-    if (url.searchParams.has("settings")) {
-      url.searchParams.delete("settings");
-      window.history.replaceState(null, "", url);
-    }
-  }, []);
 
 
   const stagedRef = useRef(0);
@@ -241,6 +226,7 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
   }, []);
 
   const problems = fleet?.fleetProblems ?? [];
+  const selectedAgent = selected ? fleet?.agents.find((a) => a.id === selected) : undefined;
   const agentCount = fleet?.agents.length ?? 0;
   const brokenCount = fleet?.agents.filter((a) => a.runtime.problems.length > 0).length ?? 0;
 
@@ -248,29 +234,16 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
     <div className="relative h-dvh w-full overflow-hidden bg-canvas">
       {/* Canvas / list */}
       {!builderId && (
-        <main className="absolute inset-0 isolate" aria-label="Agent team">
+        <main className="absolute inset-0 isolate" aria-label="Agents">
           {fleet && !phone && (
-            <Canvas fleet={fleet} savedLayout={layout ?? {}} selectedId={selected} onSelect={select} onOpenBuilder={navigate} occludedRight={selected ? inspectorWidth : 0} drawerWidth={inspectorWidth} apiRef={canvas} />
+            <Canvas fleet={fleet} savedLayout={layout ?? {}} selectedId={selected} onSelect={select} onOpenBuilder={navigate} occludedRight={selected ? cardWidth : 0} drawerWidth={cardWidth} apiRef={canvas} />
           )}
           {fleet && phone && <AgentList fleet={fleet} onOpen={setSelected} onBuild={navigate} onCreate={() => setNewOpen(true)} />}
         </main>
       )}
 
       {/* Builder: one agent in the middle, its components around it */}
-      {builderId && fleet && (
-        <Builder
-          key={builderId}
-          agentId={builderId}
-          fleet={fleet}
-          root={root}
-          engineOnline={engineOnline}
-          phone={phone}
-          wide={wide}
-          onDirtyChange={setStaged}
-          onGone={() => goBuilder(null)}
-          onOpenSettings={openSettings}
-        />
-      )}
+      {builderId && fleet && <Builder key={builderId} agentId={builderId} fleet={fleet} engineOnline={engineOnline} phone={phone} wide={wide} onDirtyChange={setStaged} onGone={() => goBuilder(null)} />}
 
       {/* Top bar */}
       <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start gap-2 p-3 sm:gap-3 sm:p-4">
@@ -279,8 +252,8 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
           {builderId ? (
             <>
               <span className="h-4 w-px bg-line" aria-hidden />
-              <Button variant="quiet" className="h-8 px-2" onClick={() => navigate(null)} aria-label="Back to the team">
-                <ArrowLeft size={14} /> <span className="hidden sm:inline">Team</span>
+              <Button variant="quiet" className="h-8 px-2" onClick={() => navigate(null)} aria-label="Back to all agents">
+                <ArrowLeft size={14} /> <span className="hidden sm:inline">Agents</span>
               </Button>
             </>
           ) : (
@@ -316,9 +289,6 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
           <Button variant="primary" onClick={() => setNewOpen(true)} className="h-8">
             <Plus size={14} strokeWidth={2.4} /> <span className="hidden sm:inline">New agent</span>
           </Button>
-          <button type="button" onClick={() => openSettings()} aria-label="Open settings" title="Settings: models, Telegram, memory, tools" className="grid size-8 place-items-center rounded-lg text-ink-2 transition-colors hover:bg-raised hover:text-ink">
-            <SettingsIcon size={15} />
-          </button>
           <ThemeToggle />
         </div>
       </header>
@@ -362,51 +332,29 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
         </aside>
       )}
 
-      {/* Empty state */}
+      {/* Empty state: a fresh home has no agents */}
       {!builderId && fleet && fleet.agents.length === 0 && (
         <div className="absolute inset-0 grid place-items-center p-6">
-          <div className="max-w-sm text-center">
-            <h2 className="text-[17px] font-semibold text-ink">{fleet.rootError ? "The root config.json cannot be read" : "No agents yet"}</h2>
-            <p className="mt-1.5 text-[13px] text-ink-2">
-              {fleet.rootError ? "Fix the problem shown above; the studio updates as soon as the file is valid." : "Create the first one. It gets its own folder in ~/.eigen/.agents."}
+          <div className="max-w-md text-center">
+            <h2 className="text-[19px] font-semibold tracking-[-0.01em] text-ink">Create your first agent</h2>
+            <p className="mt-2 text-[13.5px] text-ink-2">
+              Each agent stands on its own: its own model and keys, memory, skills, workspace and Telegram bot, in its own folder under ~/.eigen/agents. Nothing is shared between agents.
             </p>
-            {!fleet.rootError && (
-              <Button variant="primary" className="mt-4" onClick={() => setNewOpen(true)}>
-                <Plus size={14} /> Create an agent
-              </Button>
-            )}
+            <Button variant="primary" className="mt-5 h-10 px-4" onClick={() => setNewOpen(true)}>
+              <Plus size={15} strokeWidth={2.4} /> Create your first agent
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Inspector */}
+      {/* Summary card of the selected agent */}
       <AnimatePresence>
-        {selected && fleet && !builderId && (
-          <Inspector
-            key={selected}
-            id={selected}
-            fleet={fleet}
-            root={root}
-            engineOnline={engineOnline}
-            onClose={close}
-            onOpenSettings={openSettings}
-            onOpenBuilder={navigate}
-            className={cn("absolute top-0 right-0 bottom-0 z-30", phone ? "w-full" : "sm:top-[76px] sm:right-4 sm:bottom-4 sm:rounded-2xl sm:border")}
-            style={phone ? undefined : { width: inspectorWidth }}
-          />
+        {selectedAgent && !builderId && (
+          <SummaryCard key={selectedAgent.id} agent={selectedAgent} engine={engine === "online" ? "online" : "offline"} phone={phone} width={cardWidth} onClose={close} onOpenBuilder={navigate} />
         )}
       </AnimatePresence>
 
-      <NewAgentDialog
-        open={newOpen}
-        onClose={() => setNewOpen(false)}
-        fleet={fleet}
-        root={root}
-        onCreated={(id) => {
-          pendingFocus.current = id;
-          setSelected(id);
-        }}
-      />
+      <NewAgentDialog open={newOpen} onClose={() => setNewOpen(false)} fleet={fleet} onCreated={(id) => goBuilder(id)} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -418,9 +366,7 @@ function StudioInner({ initialEngine, initialSettings, initialBuilder, initialAg
         onCreate={() => setNewOpen(true)}
         onToggleTheme={theme.cycle}
         onFit={() => canvas.current?.fit()}
-        onSettings={openSettings}
       />
-      <SettingsDialog open={settings.open} onClose={closeSettings} section={settings.section} />
       <Modal open={!!leave} onClose={() => setLeave(null)} title="Leave with unapplied changes">
         <div className="p-5">
           <h3 className="text-[15px] font-semibold text-ink">Discard the changes you have not applied?</h3>

@@ -9,10 +9,9 @@
   },
   "scripts": {
     "setup": "node scripts/setup.ts",
-    "migrate": "node scripts/migrate.ts",
-    "dev": "mastra dev --env ${EIGEN_HOME:-$HOME/.eigen}/.env",
+    "dev": "mastra dev",
     "build": "mastra build --studio",
-    "serve": "mastra start --env ${EIGEN_HOME:-$HOME/.eigen}/.env",
+    "serve": "mastra start",
     "start": "npm run build && npm run serve",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

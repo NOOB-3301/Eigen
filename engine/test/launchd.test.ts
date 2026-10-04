@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { LABEL, launchdPlist } from "../src/mastra/lib/launchd.ts";
 
-const service = { node: "/usr/local/bin/node", mastraCli: "/r/node_modules/mastra/dist/index.js", repo: "/r & co", home: "/Users/sam/.eigen", envFile: "/Users/sam/.eigen/.env", logsDir: "/Users/sam/.eigen/logs", path: "/usr/local/bin:/usr/bin" };
+const service = { node: "/usr/local/bin/node", mastraCli: "/r/node_modules/mastra/dist/index.js", repo: "/r & co", home: "/Users/sam/.eigen", logsDir: "/Users/sam/.eigen/logs", path: "/usr/local/bin:/usr/bin" };
 
 describe("launchd plist", () => {
   const xml = launchdPlist(service);
 
-  it("runs mastra start with the env file, from the repo, and keeps it alive", () => {
+  it("runs mastra start without an env file (each agent reads its own), from the repo, and keeps it alive", () => {
     expect(xml).toContain(`<key>Label</key><string>${LABEL}</string>`);
-    expect(xml).toContain("<string>/usr/local/bin/node</string><string>/r/node_modules/mastra/dist/index.js</string><string>start</string><string>--env</string><string>/Users/sam/.eigen/.env</string>");
+    expect(xml).toContain("<string>/usr/local/bin/node</string><string>/r/node_modules/mastra/dist/index.js</string><string>start</string></array>");
+    expect(xml).not.toContain("--env");
     expect(xml).toContain("<key>RunAtLoad</key><true/>");
     expect(xml).toContain("<key>KeepAlive</key><true/>");
   });

@@ -31,6 +31,7 @@ export async function fakeTelegram() {
   const maxInflight = new Map<string, number>();
   const conflicts = new Map<string, number>();
   const rejected = new Map<string, { status: number; description: string }>();
+  const drops = new Map<string, number>();
   let nextId = 1000;
   let nextMessage = 1;
 
@@ -48,6 +49,12 @@ export async function fakeTelegram() {
         body = raw ? JSON.parse(raw) : {};
       } catch {}
       calls.push({ method, body, token });
+      // The network is down for this call: the connection dies without an answer, which the client sees as "fetch failed".
+      const dropsLeft = drops.get(`${token}:${method}`) ?? 0;
+      if (dropsLeft > 0) {
+        drops.set(`${token}:${method}`, dropsLeft - 1);
+        return void res.socket?.destroy();
+      }
       const send = (r: ServerResponse, payload: Record<string, unknown>, status = 200) => {
         if (r.writableEnded) return;
         r.statusCode = status;
@@ -113,6 +120,8 @@ export async function fakeTelegram() {
     maxPollers: (token = PRIMARY_TOKEN) => maxInflight.get(token) ?? 0,
     /** How many 409s Telegram has answered for this token. */
     conflicts: (token = PRIMARY_TOKEN) => conflicts.get(token) ?? 0,
+    /** Kill the connection of the next `times` calls of `method` for this token (a network that is down for a moment). They are still recorded in `calls`. */
+    drop: (token: string, method: string, times: number) => void drops.set(`${token}:${method}`, times),
     /** Answer every call for this token with an HTTP error (e.g. 401 for a revoked bot). */
     reject: (token: string, status: number, description: string) => void rejected.set(token, { status, description }),
     close: () => new Promise<void>((r) => server.close(() => r())),

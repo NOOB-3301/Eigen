@@ -2,7 +2,7 @@
 import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { motion, useReducedMotion } from "motion/react";
-import { AlertTriangle, Crown, Link2, Plus, Unplug } from "lucide-react";
+import { AlertTriangle, Link2, Plus, Unplug } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
 import { TelegramDot } from "@/components/canvas/telegram-state";
@@ -15,7 +15,15 @@ import type { Item } from "./model";
 export type BuilderNodeData = { v: VNode };
 export type BuilderNode = Node<BuilderNodeData>;
 
-const handlePos: Record<Side, Position> = { left: Position.Right, right: Position.Left, top: Position.Bottom, stack: Position.Left };
+/** Where a node's own cable leaves it: toward what it feeds. */
+const handlePos: Record<Side, Position> = { chain: Position.Right, right: Position.Left, top: Position.Bottom, bottom: Position.Top, stack: Position.Left };
+
+/** The storage, the LLM and the two recall blocks receive cables from the chain; their "in" handle faces the node that feeds them. */
+export const RECEIVES = new Set(["llm", "storage", "semanticRecall", "observational"]);
+function InHandle({ id, side }: { id: string; side: Side }) {
+  if (!RECEIVES.has(id)) return null;
+  return <Handle id="in" type="target" position={Position.Left} className={side === "stack" ? "!top-[30%]" : undefined} />;
+}
 const TONE: Record<Tone, string> = { ok: "text-ok", warn: "text-warn", bad: "text-bad", muted: "text-ink-3" };
 
 /** Nodes fade and scale in when they appear (a ghost becoming a component, a new trigger), and only fade when motion is reduced. */
@@ -30,7 +38,7 @@ function Shell({ children, className }: { children: React.ReactNode; className?:
 
 const ItemIcon = ({ item, size = 16 }: { item: Item; size?: number }) => <KindIcon kind={item.ref.kind} github={item.type === "GitHub trigger"} size={size} strokeWidth={2} aria-hidden />;
 
-const cardBase = "group/card relative flex h-[58px] w-[280px] items-center gap-2.5 rounded-xl border px-3 text-left transition-[border-color,box-shadow,opacity]";
+const cardBase = "group/card relative flex h-[58px] w-[260px] items-center gap-2.5 rounded-xl border px-3 text-left transition-[border-color,box-shadow,opacity]";
 
 function StagedDot({ id }: { id: string }) {
   const { changed } = useBuilder();
@@ -48,7 +56,7 @@ const ItemNode = memo(function ItemNode({ data, selected }: NodeProps<BuilderNod
   const warn = !!item.inactive || line?.tone === "warn";
   const bad = problems.length > 0 || line?.tone === "bad";
   const title = problems[0] ?? liveError(item, api.live) ?? item.inactive;
-  const action = off ? { label: `Switch on ${item.title}`, Icon: Link2 } : item.locked ? null : { label: `${item.unavailable ? "Remove" : item.ref.kind === "trigger" ? "Switch off" : "Disconnect"} ${item.title}`, Icon: Unplug };
+  const action = off ? { label: `Switch on ${item.title}`, Icon: Link2 } : item.locked ? null : { label: `${item.ref.kind === "trigger" || item.ref.kind === "mcp" ? "Switch off" : "Disconnect"} ${item.title}`, Icon: Unplug };
   return (
     <Shell>
       <div
@@ -66,7 +74,7 @@ const ItemNode = memo(function ItemNode({ data, selected }: NodeProps<BuilderNod
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
-            <span className={cn("truncate text-[13.5px] font-medium text-ink", /^(mcp|private-mcp|skill|trigger)$/.test(item.ref.kind) && "font-mono text-[12.5px]")}>{item.title}</span>
+            <span className={cn("truncate text-[13.5px] font-medium text-ink", /^(mcp|skill|trigger)$/.test(item.ref.kind) && "font-mono text-[12.5px]")}>{item.title}</span>
             {item.ref.kind === "telegram" && line?.tg && <TelegramDot tone={line.tg.tone} className="size-2" />}
           </span>
           <span className={cn("block truncate text-[11.5px]", line ? TONE[line.tone] : bad ? "text-bad" : warn ? "text-warn" : "text-ink-3")}>{problems[0] ?? line?.text ?? item.inactive ?? item.detail}</span>
@@ -92,6 +100,7 @@ const ItemNode = memo(function ItemNode({ data, selected }: NodeProps<BuilderNod
         )}
         <StagedDot id={item.id} />
         <Handle id="out" type="source" position={handlePos[v.side]} isConnectable={false} />
+        <InHandle id={item.id} side={v.side} />
       </div>
     </Shell>
   );
@@ -125,6 +134,7 @@ const GhostNode = memo(function GhostNode({ data, selected }: NodeProps<BuilderN
         </button>
         <StagedDot id={item.id} />
         <Handle id="out" type="source" position={handlePos[v.side]} isConnectable={!item.blocked} />
+        <InHandle id={item.id} side={v.side} />
       </div>
     </Shell>
   );
@@ -152,10 +162,9 @@ const OverflowNode = memo(function OverflowNode({ data, selected }: NodeProps<Bu
 });
 
 const ADDER: Record<Adder, (count: number) => { title: string; detail: string }> = {
-  "private-mcp": () => ({ title: "Add an MCP server", detail: "A tool server only this agent uses" }),
+  mcp: () => ({ title: "Add an MCP server", detail: "A tool server for this agent" }),
   trigger: () => ({ title: "Add a trigger", detail: "Wake it on a schedule or a pull request" }),
-  "mcp-more": (n) => ({ title: `${n} more shared ${n === 1 ? "server" : "servers"}`, detail: "Not connected. Open the list." }),
-  skills: (n) => (n > 0 ? { title: `${n} ${n === 1 ? "skill" : "skills"} in the library`, detail: "Not connected. Open the list." } : { title: "Skill library", detail: "No skills yet. Write the first one." }),
+  skills: (n) => (n > 0 ? { title: `${n} more ${n === 1 ? "skill" : "skills"} in its library`, detail: "Not connected. Open the library." } : { title: "Skill library", detail: "Write or browse this agent's skills" }),
 };
 
 const AdderNode = memo(function AdderNode({ data }: NodeProps<BuilderNode>) {
@@ -190,13 +199,13 @@ const AgentNode = memo(function AgentNode({ selected }: NodeProps<BuilderNode>) 
   const api = useBuilder();
   const a = api.agent;
   const status = api.live.status;
+  // Every engine problem counts here, wherever it is also shown; a validation issue only when it belongs to the agent itself.
   const problems = api.live.problems.length + (api.issues.agent?.length ?? 0);
   return (
     <Shell>
       <div
         className={cn(
-          "group/agent relative h-[176px] w-[300px] rounded-[var(--radius-module)] border bg-panel shadow-float transition-[border-color,box-shadow]",
-          a.primary ? "border-crown/50" : "border-line",
+          "group/agent relative h-[176px] w-[300px] rounded-[var(--radius-module)] border border-line bg-panel shadow-float transition-[border-color,box-shadow]",
           !a.enabled && "opacity-70 saturate-50",
           selected && "ring-2 ring-accent ring-offset-2 ring-offset-canvas",
         )}
@@ -206,7 +215,6 @@ const AgentNode = memo(function AgentNode({ selected }: NodeProps<BuilderNode>) 
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-[16px] font-semibold tracking-[-0.015em] text-ink">{a.name}</span>
-              {a.primary && <Crown size={14} className="shrink-0 text-crown" aria-label="primary" />}
             </div>
             <div className="mt-0.5 flex items-center gap-2 text-[12.5px] text-ink-2">
               <span className="truncate">{a.role || "no role"}</span>
@@ -219,8 +227,10 @@ const AgentNode = memo(function AgentNode({ selected }: NodeProps<BuilderNode>) 
         </div>
         <p className="line-clamp-2 px-3.5 text-[12px] leading-snug text-ink-3">{a.description}</p>
         <div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 border-t border-line px-3.5 py-2 text-[11px]">
-          <span className="rounded-md bg-accent-soft px-1.5 py-0.5 font-mono text-accent">{a.memoryScope === "shared" ? "shared memory" : "own memory"}</span>
-          <span className="rounded-md bg-raised px-1.5 py-0.5 font-mono text-ink-2">{a.sandbox === "own" ? "own sandbox" : "shared sandbox"}</span>
+          <span className="max-w-[150px] truncate rounded-md bg-raised px-1.5 py-0.5 font-mono text-ink-2" title={a.modelId}>
+            {a.modelKey || "no model"}
+          </span>
+          <span className="rounded-md bg-accent-soft px-1.5 py-0.5 font-mono text-accent">{a.memory ? `${a.memory} memory ${a.memory === 1 ? "block" : "blocks"}` : "stateless"}</span>
           {problems > 0 && (
             <span className="ml-auto inline-flex items-center gap-1 text-bad">
               <AlertTriangle size={11} aria-hidden /> {problems}
@@ -232,6 +242,7 @@ const AgentNode = memo(function AgentNode({ selected }: NodeProps<BuilderNode>) 
         <Handle id="left" type="target" position={Position.Left} className="!size-3.5" />
         <Handle id="right" type="target" position={Position.Right} className="!size-3.5" />
         <Handle id="top" type="target" position={Position.Top} className="!size-3.5" />
+        <Handle id="bottom" type="target" position={Position.Bottom} className="!size-3.5" />
       </div>
     </Shell>
   );

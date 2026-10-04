@@ -1,7 +1,6 @@
 import type { AgentEvent } from "@eigen/engine/schema";
 import { engineBase, engineEvents } from "@/lib/server/engine";
 import { offlineSnapshot } from "@/lib/server/fleet";
-import { rootConfig } from "@/lib/server/home";
 import { onFleetChange } from "@/lib/server/watch";
 import { guard } from "@/lib/server/http";
 
@@ -66,9 +65,9 @@ export async function GET(req: Request) {
       const off = onFleetChange(() => {
         let rev = String(Date.now());
         try {
-          rev = offlineSnapshot(rootConfig()).rev;
+          rev = offlineSnapshot().rev;
         } catch {
-          /* root config unreadable: still tell the UI something changed */
+          /* a folder vanished mid-scan: still tell the UI something changed */
         }
         send(message({ type: "fleet.changed", rev }));
       });
