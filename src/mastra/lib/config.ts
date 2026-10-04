@@ -70,6 +70,8 @@ export const ConfigSchema = z
         knowledge: z
           .object({
             enabled: z.boolean().default(false),
+            /** The curate/remind agents call tools with strict schemas; a weak model fails them. Defaults to the observer model. */
+            model: z.string().optional(),
             pins: z.boolean().default(true),
             tools: z.boolean().default(true),
             maxPins: posInt.default(20),
@@ -84,7 +86,9 @@ export const ConfigSchema = z
   .refine((c) => c.defaultModel in c.models, { path: ["defaultModel"], message: "must name an entry in models" })
   .refine((c) => !c.curatorModel || c.curatorModel in c.models, { path: ["curatorModel"], message: "must name an entry in models" })
   .refine((c) => !c.memory.observational.model || c.memory.observational.model in c.models, { path: ["memory", "observational", "model"], message: "must name an entry in models" })
-  .refine((c) => !c.memory.knowledge.enabled || c.memory.observational.enabled, { path: ["memory", "knowledge", "enabled"], message: "needs memory.observational.enabled" });
+  .refine((c) => !c.memory.knowledge.model || c.memory.knowledge.model in c.models, { path: ["memory", "knowledge", "model"], message: "must name an entry in models" })
+  .refine((c) => !c.memory.knowledge.enabled || c.memory.observational.enabled, { path: ["memory", "knowledge", "enabled"], message: "needs memory.observational.enabled" })
+  .refine((c) => !c.memory.knowledge.enabled || c.memory.semanticRecall.enabled, { path: ["memory", "knowledge", "enabled"], message: "needs memory.semanticRecall.enabled (the knowledge index uses the vector store)" });
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type ModelEntry = z.infer<typeof Model>;

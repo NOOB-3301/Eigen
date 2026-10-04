@@ -3,7 +3,7 @@ import type { MastraDBMessage } from "@mastra/core/agent";
 import { describe, expect, it } from "vitest";
 import { parseConfig, type Config } from "../src/mastra/lib/config.ts";
 import { buildInstructions } from "../src/mastra/lib/instructions.ts";
-import { dropScheduledTurns, makeMemory, observationalOptions, observerHooks } from "../src/mastra/lib/memory.ts";
+import { clipStrings, dropScheduledTurns, makeMemory, observationalOptions, observerHooks } from "../src/mastra/lib/memory.ts";
 import { hasSecret, redact, redactDeep } from "../src/mastra/lib/secrets.ts";
 import { DEFAULTS, tmpHome } from "./helpers/home.ts";
 
@@ -39,7 +39,7 @@ describe("memory config", () => {
 describe("observationalOptions", () => {
   it("uses thread scope, the configured thresholds and the recall tool with semantic search", () => {
     const o = observationalOptions(() => cfgWith({ observational: { enabled: true, messageTokens: 3000, reflectionTokens: 9000, activateAfterIdle: "10m" } }))!;
-    expect(o).toMatchObject({ scope: "thread", observation: { messageTokens: 3000 }, reflection: { observationTokens: 9000 }, activateAfterIdle: "10m", retrieval: { vector: true } });
+    expect(o).toMatchObject({ scope: "thread", observation: { messageTokens: 3000, failurePolicy: "continue" }, reflection: { observationTokens: 9000, failurePolicy: "continue" }, activateAfterIdle: "10m", retrieval: { vector: true } });
     expect(o).not.toHaveProperty("experimental_subconscious");
   });
 
@@ -58,6 +58,13 @@ describe("observationalOptions", () => {
     const o = observationalOptions(() => live)!;
     live = cfgWith({ observational: { enabled: true, model: "cloud" } });
     expect((o.model as () => unknown)()).toBe("anthropic/claude-sonnet-5-5");
+  });
+
+  it("lets the knowledge agents use their own model", () => {
+    const o = observationalOptions(() => cfgWith({ observational: { enabled: true, model: "small" }, knowledge: { enabled: true, model: "cloud" } }))!;
+    const sub = (o as { experimental_subconscious?: { resolved: { observation: Array<{ model?: unknown }> } } }).experimental_subconscious!;
+    expect((sub.resolved.observation[0]!.model as () => unknown)()).toBe("anthropic/claude-sonnet-5-5");
+    expect((o.model as () => unknown)()).toBe("ollama-cloud/gpt-oss:20b");
   });
 
   it("adds the Subconscious only when knowledge is enabled", () => {
@@ -97,6 +104,15 @@ describe("what the Observer is allowed to see", () => {
     expect(hasSecret(text!)).toBe(false);
     expect(text).toContain("my key is");
     expect(hooks.afterObservation({ observations: "uses Bearer abcdefghijklmnopqrstuvwxyz0123" }).observations).not.toMatch(/abcdefghij/);
+  });
+
+  it("clips huge tool output so the Observer prompt stays inside its model", async () => {
+    const big = "x".repeat(50_000);
+    const out = await observerHooks().beforeObservation({ messages: [msg("assistant", big)] } as never);
+    const [text] = texts(out.messages);
+    expect(text!.length).toBeLessThan(2100);
+    expect(text).toContain("[clipped 48000 chars]");
+    expect(clipStrings({ a: ["short", big], n: 1 })).toEqual({ a: ["short", `${"x".repeat(2000)}…[clipped 48000 chars]`], n: 1 });
   });
 
   it("returns no messages (so the Observer is skipped) when everything was scheduled", async () => {

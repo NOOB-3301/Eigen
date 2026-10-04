@@ -23,6 +23,8 @@ export function homePaths(home = eigenHome()) {
     sandboxSkillsDir: join(sandboxDir, "skills"),
     sandboxQuarantineDir: join(sandboxDir, "skills-quarantine"),
     sandboxHomeDir: join(sandboxDir, ".home"),
+    groundRulesFile: join(sandboxDir, "groundrules.md"),
+    groundRulesHistoryDir: join(dataDir, "groundrules-history"),
     memoryDir: join(home, "memory"),
     dataDir,
     dbFile: join(dataDir, "eigen.db"),

@@ -16,6 +16,11 @@ const MEMORY_RULE = [
   "Working memory holds small, stable facts about the user. Before updating it, read the current <working_memory_data> block and change only what changed: keep every other section and line as it is. Never rebuild it from scratch and never replace content with a placeholder such as \"unchanged\" or \"other rules\".",
   "Do not put logs, per-task progress or copied web text in working memory. Older conversation is not lost: use the recall tool, when you have one, to look it up instead of guessing.",
 ].join("\n");
+const GROUND_RULES_MAX_CHARS = 6000;
+const GROUND_RULES_INTRO = [
+  "Standing rules the user marked as critical or as ground rules. They apply in every conversation, including scheduled runs, and take priority over the rest of this prompt except safety.",
+  "When the user says something is a ground rule or critical, or states a standing always/never rule, record it right away: add one short bullet with today's date to groundrules.md in your working directory (create it with the write tool if it does not exist, otherwise use the edit tool so the other rules stay untouched), merge it into an existing rule on the same topic instead of duplicating it, then confirm in one line. Never remove or reword a rule unless the user asks. Never put secrets in it. Standing rules go here, not in working memory.",
+].join("\n");
 const FINISH_RULE = [
   "Finish what you start. Never end a turn by saying you will do something: if you write \"I'll check\", \"I'll reply\", \"let me\" or \"I'll continue\", make that tool call in the same turn instead of writing the sentence.",
   "Keep calling tools until every question in the message is answered and every task you were given is complete. If there are several items (notifications, comments, files, steps), work through all of them, one after another, before you reply. A text-only reply ends your turn, so send one only when the work is done or you are blocked and need the user.",
@@ -44,6 +49,7 @@ export const buildInstructions = (p: HomePaths, zone: string, at?: Date) =>
   compact([
     tag("operating_instructions", readText(p.systemPromptFile) || FALLBACK),
     tag("soul", readText(p.soulFile)),
+    tag("ground_rules", `${GROUND_RULES_INTRO}\n\n${truncate(readText(p.groundRulesFile), { length: GROUND_RULES_MAX_CHARS, omission: "\n[rules truncated]" }) || "(none yet)"}`),
     tag("memory", memoryBlock(p.memoryDir)),
     tag("skill_notes", readText(reportFile(p))),
     tag("secrets", SECRETS_RULE),

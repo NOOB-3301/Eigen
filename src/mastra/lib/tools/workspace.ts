@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { LocalFilesystem, Workspace, WORKSPACE_TOOLS } from "@mastra/core/workspace";
 import { appendAudit } from "../audit.ts";
+import { snapshotGroundRules } from "../ground-rules.ts";
 import type { Config } from "../config.ts";
 import type { HomePaths } from "../home.ts";
 import { makeSandbox, refreshSkillEnv, resolveIsolation } from "../sandbox.ts";
@@ -27,6 +28,12 @@ export const touchesSkillEnv = ({ workspaceToolName, input }: Call) =>
   workspaceToolName === SANDBOX.EXECUTE_COMMAND
     ? /(^|[\s>/])\.env\b/.test(String(input.command ?? ""))
     : ([FS.WRITE_FILE, FS.EDIT_FILE] as string[]).includes(workspaceToolName) && /^\/?\.env$/.test(String(input.path ?? ""));
+
+/** Writes and shell commands that can change groundrules.md. */
+export const touchesGroundRules = ({ workspaceToolName, input }: Call) =>
+  workspaceToolName === SANDBOX.EXECUTE_COMMAND
+    ? /\bgroundrules\.md\b/.test(String(input.command ?? ""))
+    : ([FS.WRITE_FILE, FS.EDIT_FILE] as string[]).includes(workspaceToolName) && /^\/?groundrules\.md$/.test(String(input.path ?? ""));
 
 /** Returns a reason to refuse a bash call, or undefined to allow it. */
 export function vetCall(p: HomePaths, cfg: Config, { workspaceToolName, input }: Call) {
@@ -71,6 +78,7 @@ export function makeWorkspace(p: HomePaths, cfg: Config, isolation = resolveIsol
           if (error) return;
           const call = { workspaceToolName, input: input as Record<string, unknown> };
           if (touchesSkillEnv(call)) refreshSkillEnv(sandbox, p);
+          if (touchesGroundRules(call)) snapshotGroundRules(p);
           if (!touchesSkills(call)) return;
           reconcileSkills(p);
           await workspace.skills?.refresh(); // don't wait for Mastra's 30 s staleness check

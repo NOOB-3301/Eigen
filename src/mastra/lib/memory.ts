@@ -26,13 +26,24 @@ export function dropScheduledTurns(messages: MastraDBMessage[]) {
   });
 }
 
-/** What the Observer is allowed to see and keep: no skill text, no scheduled turns, no secrets (before and after it runs). */
+const MAX_OBSERVED_CHARS = 2000;
+
+/** Long tool output (curl JSON, web pages) is what makes the Observer's prompt overflow its model; keep the start of each string. */
+export function clipStrings<T>(value: T, max = MAX_OBSERVED_CHARS): T {
+  if (typeof value === "string") return (value.length > max ? `${value.slice(0, max)}…[clipped ${value.length - max} chars]` : value) as T;
+  if (Array.isArray(value)) return value.map((v) => clipStrings(v, max)) as T;
+  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clipStrings(v, max)])) as T;
+  return value;
+}
+
+/** What the Observer is allowed to see and keep: no skill text, no scheduled turns, no secrets, nothing huge (before and after it runs). */
 export function observerHooks() {
   const withoutSkills = skillResultRedactor();
   return {
     beforeObservation: async (input: Parameters<typeof withoutSkills>[0]) => {
       const messages = (await withoutSkills(input))?.messages ?? input.messages;
-      return { messages: redactDeep(dropScheduledTurns(messages)) };
+      return { messages: clipStrings(redactDeep(dropScheduledTurns(messages))) };
     },
     afterObservation: ({ observations }: { observations: string }) => ({ observations: redact(observations) }),
   };
@@ -50,18 +61,23 @@ export function observationalOptions(getCfg: () => Config) {
     const c = getCfg();
     return toMastraModel(c.models[c.memory.observational.model ?? c.curatorModel ?? c.defaultModel]!);
   };
+  const knowledgeModel = () => {
+    const c = getCfg();
+    return c.memory.knowledge.model ? toMastraModel(c.models[c.memory.knowledge.model]!) : model();
+  };
   return {
     model,
     scope: "thread" as const,
-    observation: { messageTokens: om.messageTokens },
-    reflection: { observationTokens: om.reflectionTokens },
+    // A failing Observer must never block the chat (the default 'abort' cancels the user's turn); the input stays pending for the next cycle.
+    observation: { messageTokens: om.messageTokens, maxRetries: 2, failurePolicy: "continue" as const },
+    reflection: { observationTokens: om.reflectionTokens, maxRetries: 2, failurePolicy: "continue" as const },
     activateAfterIdle: om.activateAfterIdle,
     retrieval: om.retrieval && (semanticRecall.enabled ? { vector: true } : true),
     hooks: observerHooks(),
     ...(kn.enabled && {
       experimental_subconscious: new Subconscious({
         observation: ["remind", "curate"],
-        model,
+        model: knowledgeModel,
         defaultScope: "resource",
         tools: kn.tools,
         pins: kn.pins && { maxPins: kn.maxPins, maxCharacters: kn.maxCharacters },
