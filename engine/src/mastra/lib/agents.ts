@@ -45,6 +45,7 @@ import {
 import { instructionsPath } from "./store.ts";
 import { makeMcp, type Mcp } from "./tools/mcp.ts";
 import { makeWorkspace } from "./tools/workspace.ts";
+import { syncEnv } from "./envfile.ts";
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Scan: pure read of the folder, no side effects                                                    */
@@ -212,6 +213,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
   const events = new EventEmitter<{ event: [AgentEvent] }>();
   const running = new Map<string, Running>();
   const runtime = new Map<string, AgentRuntime>();
+  const ownedEnv = new Map<string, string>();
   let scan: Scan = { agents: new Map(), fleet: [] };
   let rootProblem: string | undefined;
   let mastra: Mastra | undefined;
@@ -333,6 +335,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
     attach(m: Mastra): Promise<void> {
       if (mastra === m && attached) return attached;
       mastra = m;
+      syncEnv(paths, ownedEnv);
       return (attached = sync());
     },
 
@@ -349,6 +352,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
       // Recursive fs.watch: native on macOS, supported on Linux since Node 20. Rename-replace (atomic writes) fires too.
       watchers.push(watch(paths.agentsDir, { recursive: true }, (_e, f) => f && relevant(f.toString()) && onChange(false)));
       watchers.push(watch(dirname(paths.configFile), (_e, f) => f?.toString() === basename(paths.configFile) && onChange(true)));
+      watchers.push(watch(dirname(paths.envFile), (_e, f) => f?.toString() === basename(paths.envFile) && syncEnv(paths, ownedEnv) && onChange(false)));
     },
 
     async close() {
