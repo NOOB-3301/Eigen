@@ -96,12 +96,12 @@ export function scanAgents(agentsDir: string, root: Config): Scan {
   for (const e of entries) if (e.isDirectory() && !ignoredDir(e.name)) agents.set(e.name, scanAgentDir(join(agentsDir, e.name), root));
 
   const valid = [...agents.values()].flatMap((a) => (a.config && !a.problems.length ? [a.config] : []));
-  const cross = fleetProblems(valid);
+  const cross = fleetProblems(valid, root);
   for (const [id, msgs] of Object.entries(cross)) {
     const a = agents.get(id);
     if (!a) continue;
     a.problems.push(...msgs);
-    delete a.resolved; // a cross-agent problem makes the agent invalid too (e.g. alias clash)
+    delete a.resolved; // a cross-agent problem makes the agent invalid too (e.g. two agents on one Telegram bot token)
     delete a.hash;
   }
   return { agents, fleet: cross["*"] ?? [] };
@@ -363,11 +363,6 @@ export function createAgentRegistry(opts: RegistryOptions) {
     primaryId: () => [...running.values()].find((r) => r.resolved.primary)?.resolved.id ?? fsAgentIds[0]!,
     subAgents,
 
-    /** Telegram routing: "@alias" / "/use alias" -> agent id, only for loaded agents. */
-    byAlias(alias: string) {
-      return [...running.values()].find((r) => r.resolved.aliases.includes(alias.toLowerCase()))?.resolved.id;
-    },
-
     /** Body for GET /eigen/agents/:id. */
     detail(id: string): GetAgentRuntimeResponse | undefined {
       const s = scan.agents.get(id);
@@ -388,7 +383,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
           enabled: c?.enabled ?? false,
           primary: r?.primary ?? c?.primary ?? false,
           modelKey: r?.modelKey ?? c?.model ?? "",
-          aliases: r?.aliases ?? [],
+          telegram: r?.telegram ?? { enabled: false, allowedUserIds: [], source: "root" as const },
           runtime: runtime.get(s.id) ?? { status: "invalid", problems: s.problems },
         };
       });

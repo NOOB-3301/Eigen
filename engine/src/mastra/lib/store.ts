@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { Config } from "./config.ts";
+import { ConfigSchema, type Config } from "./config.ts";
 import type { HomePaths } from "./home.ts";
 import {
   AGENT_CONFIG_FILE,
@@ -15,8 +15,10 @@ import {
   agentProblems,
   type AgentConfig,
   type AgentConfigInput,
+  type GetRootConfigResponse,
   type UpdateAgentConfigRequest,
   type UpdateAgentConfigResponse,
+  type UpdateRootConfigRequest,
 } from "./schema.ts";
 
 export type StoreResult = { status: number; body: UpdateAgentConfigResponse };
@@ -120,6 +122,43 @@ export function trashAgent(p: HomePaths, id: string): { status: number; error?: 
   mkdirSync(dirname(dest), { recursive: true });
   renameSync(dir, dest);
   return { status: 200, trashedTo: dest };
+}
+
+/* The shared root ~/.eigen/config.json: model catalog, telegram, sandbox policy, memory defaults, MCP catalog. */
+
+/** The file as the editor sees it (no defaults filled in). A file that is not JSON comes back as `{}` with the reason in `parseError`. */
+export function readRoot(p: HomePaths): GetRootConfigResponse | undefined {
+  const text = readOrNull(p.configFile);
+  if (text === null) return undefined;
+  try {
+    return { config: JSON.parse(text), etag: etagOf(text) };
+  } catch (e) {
+    return { config: {}, etag: etagOf(text), parseError: (e as Error).message };
+  }
+}
+
+/** The schema, plus the references agents hold into it: removing a model or MCP server an agent still uses is refused with the agent named. */
+export function validateRoot(p: HomePaths, config: unknown): { issues: string[]; parsed?: Config } {
+  const r = ConfigSchema.safeParse(config);
+  if (!r.success) return { issues: r.error.issues.map((i) => `${i.path.join(".") || "config"}: ${i.message}`) };
+  const issues = listAgentIds(p).flatMap((id) => {
+    const a = readAgent(p, id);
+    const parsed = a && AgentConfigSchema.safeParse(a.config);
+    return parsed?.success ? agentProblems(parsed.data, r.data).map((m) => `agent "${id}": ${m}`) : [];
+  });
+  return { issues, parsed: r.data };
+}
+
+/** PUT /api/root. The engine watches the file: model, telegram-allow-list and memory changes apply to running agents; MCP changes reconnect. */
+export function writeRoot(p: HomePaths, req: UpdateRootConfigRequest): StoreResult {
+  const current = readOrNull(p.configFile);
+  if (current === null) return { status: 404, body: { ok: false, issues: ["no config.json"] } };
+  if (req.etag && req.etag !== etagOf(current)) return { status: 409, body: { ok: false, etag: etagOf(current), issues: ["config.json changed since you opened it"] } };
+  const { issues } = validateRoot(p, req.config);
+  if (issues.length) return { status: 400, body: { ok: false, issues } };
+  const next = `${JSON.stringify(req.config, null, 2)}\n`;
+  writeAtomic(p.configFile, next);
+  return { status: 200, body: { ok: true, etag: etagOf(next) } };
 }
 
 /* Node positions live outside the agent files, so dragging a node never reloads an agent. */

@@ -77,7 +77,7 @@ describe("scanAgents", () => {
     expect(fleet).toEqual([]);
     const r = agents.get("researcher")!;
     expect(r.problems).toEqual([]);
-    expect(r.resolved).toMatchObject({ modelKey: "cloud", maxSteps: 5, primary: false, aliases: ["researcher"], provenance: { model: "agent", "memory.lastMessages": "root" } });
+    expect(r.resolved).toMatchObject({ modelKey: "cloud", maxSteps: 5, primary: false, telegram: { enabled: false, source: "root" }, provenance: { model: "agent", "memory.lastMessages": "root" } });
     expect(agents.get("eigen")!.resolved).toMatchObject({ primary: true, modelKey: "local", instructions: { includeMemoryFiles: true } });
   });
 
@@ -104,16 +104,26 @@ describe("scanAgents", () => {
     expect(scanAgents(p.agentsDir, rootCfg()).agents.get("peek")!.problems.join()).toMatch(/\.md/);
   });
 
-  it("flags alias clashes on the second owner only", () => {
-    const p = home();
-    addAgent(p, "alpha", { telegram: { aliases: ["r"] } });
-    addAgent(p, "beta", { telegram: { aliases: ["r"] } });
+  it("gives each agent its own Telegram bot and flags a shared token on the second owner only", () => {
+    const p = home({ telegram: { tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [7] } });
+    addAgent(p, "alpha", { telegram: { enabled: true, tokenEnv: "TG_ALPHA" } });
+    addAgent(p, "beta", { telegram: { enabled: true, tokenEnv: "TG_ALPHA" } });
+    addAgent(p, "gamma", { telegram: { enabled: true, tokenEnv: "TG_GAMMA", allowedUserIds: [9] } });
+    addAgent(p, "delta", { telegram: { enabled: true } });
     const { agents } = scanAgents(p.agentsDir, rootCfg());
-    expect(agents.get("alpha")!.resolved).toBeDefined();
-    expect(agents.get("beta")!.problems.join()).toMatch(/alias "r" is already used by "alpha"/);
+    expect(agents.get("alpha")!.resolved?.telegram).toEqual({ enabled: true, tokenEnv: "TG_ALPHA", allowedUserIds: [7], source: "agent" });
+    expect(agents.get("gamma")!.resolved?.telegram).toMatchObject({ tokenEnv: "TG_GAMMA", allowedUserIds: [9] });
+    expect(agents.get("beta")!.problems.join()).toMatch(/tokenEnv "TG_ALPHA" is already used by "alpha"/);
     expect(agents.get("beta")!.resolved).toBeUndefined();
+    expect(agents.get("delta")!.problems.join()).toMatch(/telegram\.tokenEnv: name the \.env variable/);
   });
 
+  it("keeps the primary on the root bot unless it names its own", () => {
+    const p = home({ telegram: { tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [7] } });
+    addAgent(p, "boss", { primary: true, delegation: { acceptsFrom: "none" } });
+    const t = scanAgents(p.agentsDir, rootCfg()).agents.get("boss")!.resolved?.telegram;
+    expect(t).toEqual({ enabled: true, tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [7], source: "root" });
+  });
   it("needs exactly one enabled primary", () => {
     const p = home();
     addAgent(p, "second", { primary: true, delegation: { acceptsFrom: "none" } });
@@ -177,7 +187,9 @@ describe("agent registry", () => {
     expect(snap.topology.edges.map((e) => e.id)).toContain("delegates:eigen->researcher");
     expect(reg.detail("researcher")).toMatchObject({ id: "researcher", runtime: { status: "loaded" }, resolved: { id: "researcher" } });
     expect(reg.detail("nobody")).toBeUndefined();
-    expect(reg.byAlias("RESEARCHER")).toBe("researcher");
+    expect(snap.topology.nodes.map((n) => n.id)).toContain("channel:telegram:eigen");
+    expect(snap.topology.nodes.map((n) => n.id)).not.toContain("channel:telegram:researcher");
+    expect(snap.topology.edges.map((e) => e.id)).toContain("routes:telegram->eigen");
   });
 
   it("rebuilds a changed agent, disposing the old version", async () => {

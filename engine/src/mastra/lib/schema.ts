@@ -14,6 +14,8 @@ export const AGENT_CONFIG_FILE = "config.json";
 
 const posInt = z.number().int().positive();
 const strMap = z.record(z.string(), z.string());
+/** Names of .env variables the studio may write (and config may reference). Upper-case so they cannot be confused with config keys. */
+export const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 export const AgentId = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase slug: a-z, 0-9, '-', max 32 chars");
 
 /** Same shapes as root `mcpServers`, for servers private to one agent. */
@@ -35,7 +37,7 @@ export const AgentConfigSchema = z
     /** What the agent is for. The primary reads this to decide when to delegate, so write it for a model. */
     description: z.string().min(1).max(1000),
     enabled: z.boolean().default(true),
-    /** Exactly one enabled agent is primary: it owns the Telegram channel and supervises the rest. */
+    /** Exactly one enabled agent is primary: it supervises the rest and answers on the root Telegram bot by default. */
     primary: z.boolean().default(false),
     /** Key into root `models`. Omitted: root `defaultModel` (or the chat's /model choice for the primary). */
     model: z.string().min(1).optional(),
@@ -85,10 +87,17 @@ export const AgentConfigSchema = z
         canDelegateTo: z.array(AgentId).default([]),
       })
       .prefault({}),
+    /**
+     * Chat with this agent on Telegram through a bot of its own (create it with @BotFather; one token serves exactly one agent).
+     * The primary defaults to the root bot (root `telegram.tokenEnv`); every other agent is off until `enabled` and `tokenEnv` are set.
+     */
     telegram: z
       .object({
-        /** "@alias text" or "/use alias" in Telegram routes straight to this agent. Defaults to [id]. */
-        aliases: z.array(AgentId).optional(),
+        enabled: z.boolean().optional(),
+        /** Name of the .env variable that holds this agent's bot token. The token itself never goes in a config file. */
+        tokenEnv: z.string().regex(ENV_NAME, "upper-case env var name, e.g. TELEGRAM_BOT_TOKEN_RESEARCHER").optional(),
+        /** Telegram user ids allowed to talk to this agent. Omitted: root `telegram.allowedUserIds`. */
+        allowedUserIds: z.array(z.number().int()).optional(),
       })
       .prefault({}),
   })
@@ -107,6 +116,15 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 
 export type Source = "agent" | "root";
 
+export type ResolvedTelegram = {
+  enabled: boolean;
+  /** Env var holding the bot token; undefined only for a specialist that has not been given one yet. */
+  tokenEnv?: string;
+  allowedUserIds: number[];
+  /** root: the bot / allow-list came from root config.json; agent: this agent's own file names them. */
+  source: Source;
+};
+
 export type ResolvedAgent = {
   id: string;
   name: string;
@@ -124,7 +142,7 @@ export type ResolvedAgent = {
   maxSteps: number;
   sandboxMode: AgentConfig["sandbox"]["mode"];
   delegation: AgentConfig["delegation"];
-  aliases: string[];
+  telegram: ResolvedTelegram;
   /** Dotted path -> where the effective value came from. Only for fields an agent can override. */
   provenance: Record<string, Source>;
 };
@@ -140,7 +158,18 @@ export function agentProblems(a: AgentConfig, root: Config): string[] {
   Object.keys(a.tools.mcp.servers)
     .filter((n) => n in root.mcpServers)
     .forEach((n) => problems.push(`tools.mcp.servers.${n} shadows a root mcpServer; rename it or inherit the root one`));
+  if (a.telegram.enabled && !a.primary && !a.telegram.tokenEnv) problems.push("telegram.tokenEnv: name the .env variable that holds this agent's bot token");
+  if (a.telegram.enabled && (a.telegram.allowedUserIds ?? root.telegram.allowedUserIds).length === 0) problems.push("telegram: no allowed user ids (set telegram.allowedUserIds here or in root config.json); the bot would answer anyone");
   return problems;
+}
+
+function resolveAgentTelegram(a: AgentConfig, root: Pick<Config, "telegram">): ResolvedTelegram {
+  return {
+    enabled: a.telegram.enabled ?? a.primary,
+    tokenEnv: a.telegram.tokenEnv ?? (a.primary ? root.telegram.tokenEnv : undefined),
+    allowedUserIds: a.telegram.allowedUserIds ?? root.telegram.allowedUserIds,
+    source: a.telegram.tokenEnv ? "agent" : "root",
+  };
 }
 
 export function resolveAgent(a: AgentConfig, root: Config): ResolvedAgent {
@@ -172,33 +201,34 @@ export function resolveAgent(a: AgentConfig, root: Config): ResolvedAgent {
     maxSteps: a.limits.maxSteps ?? root.limits.maxSteps,
     sandboxMode: a.sandbox.mode,
     delegation: a.delegation,
-    aliases: a.telegram.aliases ?? [a.id],
+    telegram: resolveAgentTelegram(a, root),
     provenance: {
       model: from(a.model),
       "limits.maxSteps": from(a.limits.maxSteps),
       "memory.lastMessages": from(m.lastMessages),
       "memory.semanticRecall": from(m.semanticRecall),
       "memory.observational": from(m.observational),
+      "telegram.allowedUserIds": from(a.telegram.allowedUserIds),
     },
   };
 }
 
 /** Problems that span agents (run after every scan). Keyed by agent id; "*" for global ones. */
-export function fleetProblems(agents: AgentConfig[]): Record<string, string[]> {
+export function fleetProblems(agents: AgentConfig[], root: Pick<Config, "telegram"> = { telegram: { tokenEnv: "TELEGRAM_BOT_TOKEN", allowedUserIds: [] } }): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   const add = (id: string, msg: string) => (out[id] ??= []).push(msg);
   const enabled = agents.filter((a) => a.enabled);
   const primaries = enabled.filter((a) => a.primary);
   if (primaries.length !== 1) add("*", `exactly one enabled agent must be primary (found ${primaries.length}: ${primaries.map((a) => a.id).join(", ") || "none"})`);
   const ids = new Set(enabled.map((a) => a.id));
-  const aliasOwner = new Map<string, string>();
+  const tokenOwner = new Map<string, string>();
   for (const a of enabled) {
     a.delegation.canDelegateTo.filter((t) => !ids.has(t)).forEach((t) => add(a.id, `delegation.canDelegateTo: "${t}" is not an enabled agent`));
-    for (const alias of a.telegram.aliases ?? [a.id]) {
-      const owner = aliasOwner.get(alias);
-      if (owner) add(a.id, `telegram alias "${alias}" is already used by "${owner}"`);
-      else aliasOwner.set(alias, a.id);
-    }
+    const t = resolveAgentTelegram(a, root);
+    if (!t.enabled || !t.tokenEnv) continue;
+    const owner = tokenOwner.get(t.tokenEnv);
+    if (owner) add(a.id, `telegram.tokenEnv "${t.tokenEnv}" is already used by "${owner}"; one bot token can serve only one agent`);
+    else tokenOwner.set(t.tokenEnv, a.id);
   }
   return out;
 }
@@ -231,8 +261,19 @@ export function delegationEdges(agents: ResolvedAgent[]): Array<[from: string, t
  */
 export type AgentStatus = "loaded" | "stale" | "invalid" | "disabled" | "offline";
 
+/**
+ * off:           this agent has no bot (telegram.enabled is false).
+ * missing-token: enabled, but the .env variable is not set (or not named yet).
+ * starting:      adapter created, first getUpdates not confirmed.
+ * polling:       the bot is live; `username` is its @handle.
+ * error:         token rejected by Telegram, or another poller holds it (409); `error` says which.
+ */
+export type TelegramState = "off" | "missing-token" | "starting" | "polling" | "error";
+export type TelegramRuntime = { state: TelegramState; username?: string; error?: string };
+
 export type AgentRuntime = {
   status: AgentStatus;
+  telegram?: TelegramRuntime;
   problems: string[];
   /** sha256 of the normalized config + instructions text currently registered. */
   loadedHash?: string;
@@ -240,7 +281,7 @@ export type AgentRuntime = {
   mcpErrors?: Record<string, string>;
 };
 
-export type AgentSummary = Pick<ResolvedAgent, "id" | "name" | "role" | "description" | "enabled" | "primary" | "modelKey" | "aliases"> & {
+export type AgentSummary = Pick<ResolvedAgent, "id" | "name" | "role" | "description" | "enabled" | "primary" | "modelKey" | "telegram"> & {
   runtime: AgentRuntime;
 };
 
@@ -277,6 +318,40 @@ export type UpdateAgentConfigRequest = z.infer<typeof UpdateAgentConfigRequest>;
  */
 export type UpdateAgentConfigResponse = { ok: true; etag: string } | { ok: false; issues?: string[]; etag?: string };
 
+/** GET /api/root, PUT /api/root. The root ~/.eigen/config.json as the file holds it (no defaults filled in), so a round trip never rewrites what you did not touch. */
+export type GetRootConfigResponse = { config: Record<string, unknown>; etag: string; parseError?: string };
+export type UpdateRootConfigRequest = { config: unknown; etag?: string };
+/** Same statuses as the agent write: 200 ok, 400 issues (schema, or a model / MCP server some agent still uses), 409 changed since your GET. */
+export type UpdateRootConfigResponse = UpdateAgentConfigResponse;
+
+/**
+ * Secrets are WRITE-ONLY: the studio can set or remove a value in ~/.eigen/.env, and can see whether a name is set, but no
+ * endpoint ever returns a value. Config files only ever hold the NAME of the variable.
+ */
+export type SecretStatus = { name: string; set: boolean; usedBy: string[] };
+/** GET /api/secrets: every env name the configs reference (not every line of .env). */
+export type ListSecretsResponse = { secrets: SecretStatus[] };
+/** PUT /api/secrets/:name */
+export const SetSecretRequest = z.object({ value: z.string().min(1).max(4096) });
+export type SetSecretRequest = z.infer<typeof SetSecretRequest>;
+
+const envRefs = (values?: Record<string, string>) => Object.values(values ?? {}).flatMap((v) => (v.startsWith("env:") ? [v.slice(4)] : []));
+
+/** Env variable names the configs point at -> where they are used. Drives the studio's "API keys" panel and the engine's reload of agents whose key changed. */
+export function referencedEnvNames(root: Config, agents: AgentConfig[] = []): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (name: string | undefined, usedBy: string) => name && out.set(name, [...(out.get(name) ?? []), usedBy]);
+  add(root.telegram.tokenEnv, "telegram (root bot)");
+  for (const [k, m] of Object.entries(root.models)) add(m.apiKeyEnv, `models.${k}`);
+  add(root.memory.embedder.apiKeyEnv, "memory.embedder");
+  for (const [n, srv] of Object.entries(root.mcpServers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `mcpServers.${n}`));
+  for (const a of agents) {
+    if (a.telegram.tokenEnv) add(a.telegram.tokenEnv, `agents.${a.id}.telegram`);
+    for (const [n, srv] of Object.entries(a.tools.mcp.servers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `agents.${a.id}.mcp.${n}`));
+  }
+  return out;
+}
+
 /** GET /api/agents/events (SSE). */
 export type AgentEvent =
   | { type: "agent.loaded"; id: string; hash: string }
@@ -289,7 +364,7 @@ export type AgentEvent =
 /* ------------------------------------------------------------------------------------------------ */
 
 export type TopologyNode =
-  | { id: `channel:${string}`; type: "channel"; data: { channel: "telegram"; routesTo: string } }
+  | { id: `channel:${string}`; type: "channel"; data: { channel: "telegram"; routesTo: string; tokenEnv?: string; state: TelegramState; username?: string } }
   | { id: `agent:${string}`; type: "agent"; data: AgentSummary & { builtinTools: string[] } }
   | { id: `mcp:${string}`; type: "mcp"; data: { name: string; owner: "root" | string; trusted: boolean; error?: string } };
 
@@ -297,13 +372,14 @@ export type TopologyEdge = {
   id: string;
   source: TopologyNode["id"];
   target: TopologyNode["id"];
-  type: "routes" | "alias" | "delegates" | "uses";
+  type: "routes" | "delegates" | "uses";
   label?: string;
 };
 
 export type Topology = { nodes: TopologyNode[]; edges: TopologyEdge[] };
 
 export const agentNodeId = (id: string) => `agent:${id}` as const;
+export const telegramNodeId = (agentId: string) => `channel:telegram:${agentId}` as const;
 export const mcpNodeId = (name: string, owner = "root") => (owner === "root" ? (`mcp:${name}` as const) : (`mcp:${owner}/${name}` as const));
 
 /** Builds the graph from resolved agents. Agents that failed to resolve still appear (as summaries) with no edges. */
@@ -311,16 +387,16 @@ export function buildTopology(summaries: AgentSummary[], resolved: ResolvedAgent
   const nodes: TopologyNode[] = [];
   const edges: TopologyEdge[] = [];
   const byId = new Map(resolved.map((r) => [r.id, r]));
-  const primary = resolved.find((r) => r.primary && r.enabled);
-
-  nodes.push({ id: "channel:telegram", type: "channel", data: { channel: "telegram", routesTo: primary?.id ?? "" } });
-  if (primary) edges.push({ id: `routes:telegram->${primary.id}`, source: "channel:telegram", target: agentNodeId(primary.id), type: "routes", label: "default" });
 
   for (const s of summaries) {
     const r = byId.get(s.id);
     nodes.push({ id: agentNodeId(s.id), type: "agent", data: { ...s, builtinTools: r?.builtinTools ?? [] } });
     if (!r?.enabled) continue;
-    if (!r.primary) for (const alias of r.aliases) edges.push({ id: `alias:telegram->${r.id}:${alias}`, source: "channel:telegram", target: agentNodeId(r.id), type: "alias", label: `@${alias}` });
+    if (r.telegram.enabled) {
+      const t = s.runtime.telegram;
+      nodes.push({ id: telegramNodeId(r.id), type: "channel", data: { channel: "telegram", routesTo: r.id, tokenEnv: r.telegram.tokenEnv, state: t?.state ?? "off", username: t?.username } });
+      edges.push({ id: `routes:telegram->${r.id}`, source: telegramNodeId(r.id), target: agentNodeId(r.id), type: "routes" });
+    }
     for (const name of r.mcp.inherited) edges.push({ id: `uses:${r.id}->${name}`, source: agentNodeId(r.id), target: mcpNodeId(name), type: "uses" });
     for (const [name, srv] of Object.entries(r.mcp.own)) {
       nodes.push({ id: mcpNodeId(name, r.id), type: "mcp", data: { name, owner: r.id, trusted: srv.trusted, error: mcpErrors[`${r.id}/${name}`] } });
@@ -350,5 +426,4 @@ export const DEFAULT_PRIMARY: AgentConfigInput = {
   tools: { builtin: ["workspace", "schedule", "skills"], mcp: { inherit: "all" } },
   memory: { scope: "shared" },
   delegation: { acceptsFrom: "none" },
-  telegram: { aliases: [] },
 };
