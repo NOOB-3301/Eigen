@@ -1,10 +1,20 @@
 "use client";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Crown, Maximize2, Plus, Search, SunMoon } from "lucide-react";
+import { Crown, Maximize2, Plus, Search, Settings as SettingsIcon, SunMoon } from "lucide-react";
 import type { AgentSummary } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Kbd, Monogram, StatusDot, spring } from "@/components/ui";
+import type { SettingsSection } from "@/components/settings/settings-dialog";
+
+const SETTINGS_SECTIONS: Array<{ section: SettingsSection; label: string }> = [
+  { section: "models", label: "Models" },
+  { section: "telegram", label: "Telegram" },
+  { section: "memory", label: "Memory" },
+  { section: "sandbox", label: "Sandbox" },
+  { section: "tools", label: "Tools" },
+  { section: "advanced", label: "Advanced" },
+];
 
 type Item = { key: string; label: string; sub?: string; icon: React.ReactNode; run: () => void; group: "Agents" | "Actions"; trailing?: React.ReactNode };
 
@@ -30,6 +40,7 @@ export function CommandPalette({
   onCreate,
   onToggleTheme,
   onFit,
+  onSettings,
 }: {
   open: boolean;
   onClose: () => void;
@@ -38,6 +49,7 @@ export function CommandPalette({
   onCreate: () => void;
   onToggleTheme: () => void;
   onFit: () => void;
+  onSettings: (section?: SettingsSection) => void;
 }) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
@@ -80,9 +92,11 @@ export function CommandPalette({
       { key: "create", group: "Actions", label: "Create agent", icon: <Plus size={15} />, run: onCreate },
       { key: "fit", group: "Actions", label: "Fit the whole team in view", icon: <Maximize2 size={14} />, run: onFit },
       { key: "theme", group: "Actions", label: "Switch theme", icon: <SunMoon size={15} />, run: onToggleTheme },
+      { key: "settings", group: "Actions", label: "Settings", icon: <SettingsIcon size={15} />, run: () => onSettings() },
+      ...SETTINGS_SECTIONS.map(({ section, label }) => ({ key: `settings:${section}`, group: "Actions", label: `Settings: ${label}`, icon: <SettingsIcon size={15} />, run: () => onSettings(section) })),
     ].filter((a) => !query || score(query, a.label) > 0 || a.key === "create") as Item[];
     return [...agentItems, ...actions];
-  }, [agents, q, onJump, onCreate, onToggleTheme, onFit]);
+  }, [agents, q, onJump, onCreate, onToggleTheme, onFit, onSettings]);
 
   const clamped = Math.min(active, Math.max(0, items.length - 1));
   const choose = (i: number) => {

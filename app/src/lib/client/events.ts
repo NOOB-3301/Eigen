@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
-import type { AgentEvent } from "@eigen/engine/schema";
+import { telegramNodeId, type AgentEvent, type GetAgentResponse, type TelegramRuntime } from "@eigen/engine/schema";
+import type { FleetResponse } from "@/lib/types";
 
 type Listener = (e: AgentEvent) => void;
 const listeners = new Set<Listener>();
@@ -47,3 +48,26 @@ export function useEventStream(initial: "online" | "offline"): StreamState {
   }, []);
   return state;
 }
+
+/* `agent.telegram` carries the whole new TelegramRuntime, so the caches are patched in place (no refetch) and chips and bot nodes move at once. */
+
+/** Does the cached topology already have a bot node for this agent? If not, the bot was just enabled and the fleet must be refetched. */
+export const fleetHasBot = (f: FleetResponse, id: string) => f.topology.nodes.some((n) => n.id === telegramNodeId(id));
+
+export function applyTelegramToFleet(f: FleetResponse, id: string, t: TelegramRuntime): FleetResponse {
+  const bot = telegramNodeId(id);
+  return {
+    ...f,
+    agents: f.agents.map((a) => (a.id === id ? { ...a, runtime: { ...a.runtime, telegram: t } } : a)),
+    topology: {
+      ...f.topology,
+      nodes: f.topology.nodes.map((n) => {
+        if (n.type === "channel" && n.id === bot) return { ...n, data: { ...n.data, state: t.state, username: t.username } };
+        if (n.type === "agent" && n.data.id === id) return { ...n, data: { ...n.data, runtime: { ...n.data.runtime, telegram: t } } };
+        return n;
+      }),
+    },
+  };
+}
+
+export const applyTelegramToAgent = (a: GetAgentResponse, t: TelegramRuntime): GetAgentResponse => ({ ...a, runtime: { ...a.runtime, telegram: t } });

@@ -36,7 +36,7 @@ const LEAVE_MS = 280;
 
 function ariaFor(n: Topology["nodes"][number]): string {
   if (n.type === "agent") return `Agent ${n.data.name}${n.data.primary ? ", primary" : ""}, ${STATUS[n.data.runtime.status].label}${n.data.runtime.problems.length ? `, ${n.data.runtime.problems.length} problems` : ""}`;
-  if (n.type === "channel") return `Telegram channel, routes to ${n.data.routesTo || "nobody"}`;
+  if (n.type === "channel") return `Telegram bot${n.data.username ? ` @${n.data.username}` : ""} for ${n.data.routesTo || "nobody"}, ${n.data.state}`;
   return `Tool server ${n.data.name}`;
 }
 
@@ -48,7 +48,7 @@ function toNodes(fleet: FleetResponse, positions: Layout, prev: Map<string, Stud
     const enterDelay = initial ? Math.min(0.5, Math.max(0, pos.x) / 1600) : 0;
     const base = { id: t.id, position: pos, ariaLabel: ariaFor(t), selected: old?.selected ?? false, width: NODE_SIZE[t.type]!.w };
     if (t.type === "agent") return { ...base, type: "agent", data: { ...t.data, overrides: fleet.overrides[t.data.id] ?? [], enterDelay } } as StudioNode;
-    if (t.type === "channel") return { ...base, type: "channel", data: { ...t.data, enterDelay }, selectable: false } as StudioNode;
+    if (t.type === "channel") return { ...base, type: "channel", data: { ...t.data, offline: fleet.engine === "offline", enterDelay }, selectable: false } as StudioNode;
     return { ...base, type: "mcp", data: { ...t.data, enterDelay }, selectable: false } as StudioNode;
   });
 }

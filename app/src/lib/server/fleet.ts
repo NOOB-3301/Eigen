@@ -121,6 +121,7 @@ export async function fleet(): Promise<FleetResponse> {
 export function rootInfo(): RootInfo {
   const root = rootConfig();
   return {
+    telegram: { tokenEnv: root.telegram.tokenEnv, allowedUserIds: root.telegram.allowedUserIds },
     defaultModel: root.defaultModel,
     models: Object.entries(root.models).map(([key, m]) => ({ key, id: m.id, contextWindow: m.contextWindow })),
     mcpServers: Object.entries(root.mcpServers).map(([name, s]) => ({ name, enabled: s.enabled, trusted: s.trusted })),

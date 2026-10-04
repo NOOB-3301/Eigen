@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { AlertTriangle, ChevronRight, Crown, Plus } from "lucide-react";
 import type { FleetResponse } from "@/lib/types";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
+import { TelegramStateChip, telegramView } from "@/components/canvas/telegram-state";
 
 /** Phone layout: the canvas is too cramped below 640px, so the team is a list (primary first). */
 export function AgentList({ fleet, onOpen, onCreate }: { fleet: FleetResponse; onOpen: (id: string) => void; onCreate: () => void }) {
@@ -28,6 +29,7 @@ export function AgentList({ fleet, onOpen, onCreate }: { fleet: FleetResponse; o
                     <span className="truncate">{a.role}</span>
                     <span className="font-mono text-[11.5px] text-ink-3">{a.modelKey}</span>
                   </span>
+                  {a.telegram.enabled && <TelegramStateChip view={telegramView(a.runtime.telegram, { enabled: true, engineOffline: fleet.engine === "offline" })} className="mt-1" />}
                   {a.runtime.problems.length > 0 && (
                     <span className="mt-1 flex items-center gap-1 text-[12px] text-bad">
                       <AlertTriangle size={11} /> {a.runtime.problems[0]}

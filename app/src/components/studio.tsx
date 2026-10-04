@@ -3,11 +3,11 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { SWRConfig, useSWRConfig } from "swr";
 import { AnimatePresence, motion } from "motion/react";
 import { Toaster, toast } from "sonner";
-import { AlertTriangle, Plus, Search } from "lucide-react";
-import type { AgentEvent } from "@eigen/engine/schema";
+import { AlertTriangle, Plus, Search, Settings as SettingsIcon } from "lucide-react";
+import type { AgentEvent, GetAgentResponse } from "@eigen/engine/schema";
 import type { FleetResponse, Layout, RootInfo } from "@/lib/types";
 import { keys, useFleet, useLayout, useRoot } from "@/lib/client/api";
-import { awaitingReload, onAgentEvent, useEventStream } from "@/lib/client/events";
+import { applyTelegramToAgent, applyTelegramToFleet, awaitingReload, fleetHasBot, onAgentEvent, useEventStream } from "@/lib/client/events";
 import { cn } from "@/lib/cn";
 import { Button, Kbd, softSpring } from "@/components/ui";
 import { ThemeToggle, useTheme } from "@/components/theme";
@@ -17,13 +17,14 @@ import { Inspector } from "@/components/inspector/inspector";
 import { NewAgentDialog } from "@/components/new-agent-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import { AgentList } from "@/components/agent-list";
+import { SettingsDialog, type SettingsSection } from "@/components/settings/settings-dialog";
 
-type Props = { initialFleet: FleetResponse; initialRoot?: RootInfo; initialLayout: Layout };
+type Props = { initialFleet: FleetResponse; initialRoot?: RootInfo; initialLayout: Layout; initialSettings?: SettingsSection };
 
-export function Studio({ initialFleet, initialRoot, initialLayout }: Props) {
+export function Studio({ initialFleet, initialRoot, initialLayout, initialSettings }: Props) {
   return (
     <SWRConfig value={{ fallback: { [keys.fleet]: initialFleet, [keys.root]: initialRoot, [keys.layout]: initialLayout } }}>
-      <StudioInner initialEngine={initialFleet.engine} />
+      <StudioInner initialEngine={initialFleet.engine} initialSettings={initialSettings} />
     </SWRConfig>
   );
 }
@@ -39,7 +40,7 @@ const useMedia = (q: string) =>
     () => false,
   );
 
-function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" }) {
+function StudioInner({ initialEngine, initialSettings }: { initialEngine: "online" | "offline"; initialSettings?: SettingsSection }) {
   const { data: fleet } = useFleet();
   const { data: root } = useRoot();
   const { data: layout } = useLayout();
@@ -51,6 +52,7 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
   const [selected, setSelected] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [settings, setSettings] = useState<{ open: boolean; section?: SettingsSection }>({ open: !!initialSettings, section: initialSettings });
   const canvas = useRef<CanvasApi>(null);
   const pendingFocus = useRef<string | null>(null);
 
@@ -77,6 +79,23 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
       loaded = [];
     };
     const off = onAgentEvent((ev: AgentEvent) => {
+      if (ev.type === "agent.telegram") {
+        // The event is the new state itself: patch both caches in place. Only a bot that has no node yet needs the topology refetched.
+        let refetch = false;
+        void mutate(
+          keys.fleet,
+          (f?: FleetResponse) => {
+            if (!f) return f;
+            refetch = ev.telegram.state !== "off" && !fleetHasBot(f, ev.id);
+            return applyTelegramToFleet(f, ev.id, ev.telegram);
+          },
+          { revalidate: false },
+        ).then(() => refetch && mutate(keys.fleet));
+        void mutate(keys.agent(ev.id), (a?: GetAgentResponse) => a && applyTelegramToAgent(a, ev.telegram), { revalidate: false });
+        if (ev.telegram.state === "error")
+          toast.error(`${names.current.get(ev.id) ?? ev.id}'s Telegram bot has a problem`, { id: `tg-${ev.id}`, description: ev.telegram.error ?? "Telegram rejected the bot." });
+        return;
+      }
       void mutate(keys.fleet);
       if (ev.type === "fleet.changed") {
         void mutate(keys.root);
@@ -119,6 +138,17 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
     // Return focus to the node the drawer was opened from.
     if (id) setTimeout(() => document.querySelector<HTMLElement>(`.react-flow__node[data-id="agent:${id}"]`)?.focus(), 50);
   }, [selected]);
+
+  const openSettings = useCallback((section?: SettingsSection) => setSettings({ open: true, section }), []);
+  const closeSettings = useCallback(() => {
+    setSettings((s) => ({ ...s, open: false }));
+    // Drop a ?settings= deep link so a reload does not reopen the dialog.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("settings")) {
+      url.searchParams.delete("settings");
+      window.history.replaceState(null, "", url);
+    }
+  }, []);
 
   const jump = useCallback((id: string) => {
     setSelected(id);
@@ -181,6 +211,9 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
           <Button variant="primary" onClick={() => setNewOpen(true)} className="h-8">
             <Plus size={14} strokeWidth={2.4} /> <span className="hidden sm:inline">New agent</span>
           </Button>
+          <button type="button" onClick={() => openSettings()} aria-label="Open settings" title="Settings: models, Telegram, memory, tools" className="grid size-8 place-items-center rounded-lg text-ink-2 transition-colors hover:bg-raised hover:text-ink">
+            <SettingsIcon size={15} />
+          </button>
           <ThemeToggle />
         </div>
       </header>
@@ -251,6 +284,7 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
             root={root}
             engineOnline={engineOnline}
             onClose={close}
+            onOpenSettings={openSettings}
             className={cn("absolute top-0 right-0 bottom-0 z-30", phone ? "w-full" : "sm:top-[76px] sm:right-4 sm:bottom-4 sm:rounded-2xl sm:border")}
             style={phone ? undefined : { width: inspectorWidth }}
           />
@@ -275,7 +309,9 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
         onCreate={() => setNewOpen(true)}
         onToggleTheme={theme.cycle}
         onFit={() => canvas.current?.fit()}
+        onSettings={openSettings}
       />
+      <SettingsDialog open={settings.open} onClose={closeSettings} section={settings.section} />
       <Toaster
         theme={theme.resolved}
         position="bottom-center"

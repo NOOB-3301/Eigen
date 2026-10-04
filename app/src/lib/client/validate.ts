@@ -13,11 +13,18 @@ export function validateDraft(id: string, config: unknown, root?: RootInfo): Val
   };
   const r = AgentConfigSchema.safeParse(config);
   if (!r.success) {
-    for (const i of r.error.issues) add(i.path.join("."), i.message);
+    // zod words an empty required string as "Too small: expected string to have >=1 characters"; say what is wrong instead.
+    for (const i of r.error.issues) add(i.path.join("."), /^Too small: expected string to have >=1 characters?$/.test(i.message) ? "required" : i.message);
     return { ok: false, issues, byPath };
   }
   const a = r.data;
   if (a.id !== id) add("id", `must equal the folder name "${id}"`);
+  const tg = a.telegram;
+  if (tg.enabled && !a.primary && !tg.tokenEnv) add("telegram.tokenEnv", "name the .env variable that holds this bot's token");
+  if (tg.enabled && !a.primary) {
+    const ids = tg.allowedUserIds ?? root?.telegram?.allowedUserIds;
+    if (ids && ids.length === 0) add("telegram.allowedUserIds", tg.allowedUserIds ? "add at least one Telegram user id, or reset to inherit the root list" : "the root list is empty: add user ids in Settings, or override them here");
+  }
   if (root) {
     const models = new Set(root.models.map((m) => m.key));
     const servers = new Set(root.mcpServers.map((s) => s.name));

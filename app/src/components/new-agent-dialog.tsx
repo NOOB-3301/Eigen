@@ -3,13 +3,16 @@ import { useMemo, useState } from "react";
 import { useSWRConfig } from "swr";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
-import type { AgentConfigInput } from "@eigen/engine/schema";
+import { ENV_NAME, type AgentConfigInput } from "@eigen/engine/schema";
 import type { FleetResponse, RootInfo } from "@/lib/types";
 import { createAgent, keys } from "@/lib/client/api";
+import { useSecrets } from "@/lib/client/secrets";
 import { validateDraft } from "@/lib/client/validate";
 import { cn } from "@/lib/cn";
-import { Button, Modal, Segmented } from "@/components/ui";
+import { Button, Modal, Segmented, Switch } from "@/components/ui";
 import { inputCls } from "@/components/inspector/fields";
+import { SecretInput } from "@/components/secret-input";
+import { suggestTokenEnv } from "@/components/canvas/telegram-state";
 
 const PRESETS = {
   minimal: { label: "Files only", builtin: ["workspace"], inherit: "none" },
@@ -36,11 +39,17 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
   const [description, setDescription] = useState("");
   const [model, setModel] = useState("");
   const [preset, setPreset] = useState<Preset>("minimal");
+  const [bot, setBot] = useState(false);
+  const [tokenEnv, setTokenEnv] = useState("");
   const [busy, setBusy] = useState(false);
   const [serverIssues, setServerIssues] = useState<string[]>([]);
   const [tried, setTried] = useState(false);
 
   const effectiveId = idTouched ? id : slugify(name);
+  // The token variable follows the id until it is edited by hand.
+  const effectiveToken = tokenEnv || suggestTokenEnv(effectiveId);
+  const tokenValid = ENV_NAME.test(effectiveToken);
+  const { isSet } = useSecrets(bot && tokenValid ? [effectiveToken] : []);
   const config = useMemo<AgentConfigInput>(() => {
     const p = PRESETS[preset];
     return {
@@ -50,13 +59,19 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
       description: description.trim(),
       ...(model ? { model } : {}),
       tools: { builtin: [...p.builtin], mcp: { inherit: p.inherit } },
+      ...(bot ? { telegram: { enabled: true, tokenEnv: effectiveToken } } : {}),
     };
-  }, [effectiveId, name, role, description, model, preset]);
+  }, [effectiveId, name, role, description, model, preset, bot, effectiveToken]);
 
   const v = validateDraft(effectiveId, config, root);
   const taken = fleet?.agents.some((a) => a.id === effectiveId);
-  const errors: Record<string, string> = { ...v.byPath, ...(taken ? { id: "an agent with this id already exists" } : {}) };
-  const ok = v.ok && !taken;
+  const tokenOwner = bot ? fleet?.agents.find((a) => a.id !== effectiveId && a.enabled && a.telegram.enabled && a.telegram.tokenEnv === effectiveToken) : undefined;
+  const errors: Record<string, string> = {
+    ...v.byPath,
+    ...(taken ? { id: "an agent with this id already exists" } : {}),
+    ...(tokenOwner ? { "telegram.tokenEnv": `${tokenOwner.name} already uses this variable; one bot token can serve only one agent` } : {}),
+  };
+  const ok = v.ok && !taken && !tokenOwner;
 
   const reset = () => {
     setName("");
@@ -66,6 +81,8 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
     setDescription("");
     setModel("");
     setPreset("minimal");
+    setBot(false);
+    setTokenEnv("");
     setServerIssues([]);
     setTried(false);
   };
@@ -144,6 +161,32 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
               {PRESETS[preset].inherit === "all" ? ", plus every shared tool server" : ""}. You can change this later.
             </p>
           </div>
+          <div className="sm:col-span-2">
+            <div className="flex items-start gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="text-[12.5px] font-medium text-ink-2">Give it a Telegram bot</div>
+                <p className="mt-0.5 text-[12px] text-ink-3">Optional. Chat with this agent in its own Telegram chat; create the bot with @BotFather. You can also do this later.</p>
+              </div>
+              <Switch label="Give it a Telegram bot" checked={bot} onChange={setBot} />
+            </div>
+            {bot && (
+              <div className="mt-3 grid gap-3 rounded-xl border border-line p-3">
+                <L label="Token variable" error={err("telegram.tokenEnv")} hint="The name of the line in ~/.eigen/.env that will hold the token.">
+                  {(a) => (
+                    <input
+                      {...a}
+                      value={effectiveToken}
+                      spellCheck={false}
+                      autoCapitalize="characters"
+                      onChange={(e) => setTokenEnv(e.target.value.toUpperCase().replace(/\s+/g, ""))}
+                      className={cn(inputCls(!!a["aria-invalid"]), "font-mono text-[13px]")}
+                    />
+                  )}
+                </L>
+                {tokenValid && <SecretInput name={effectiveToken} set={isSet(effectiveToken)} label="Bot token" />}
+              </div>
+            )}
+          </div>
         </div>
         {serverIssues.length > 0 && (
           <ul role="alert" className="mx-5 mb-4 space-y-1 rounded-lg bg-bad/10 px-3 py-2 text-[12.5px] text-bad">
@@ -156,7 +199,7 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
           <Button variant="quiet" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary" disabled={busy || (tried && !ok)}>
+          <Button type="submit" variant="primary" disabled={busy}>
             {busy && <Loader2 size={13} className="animate-spin" />} Create agent
           </Button>
         </div>
@@ -166,7 +209,7 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
 }
 
 function L({ label, error, hint, children }: { label: string; error?: string; hint?: string; children: (a: { id: string; "aria-invalid": boolean; "aria-describedby"?: string }) => React.ReactNode }) {
-  const id = `new-${label.toLowerCase()}`;
+  const id = `new-${label.toLowerCase().replace(/\s+/g, "-")}`;
   return (
     <div>
       <label htmlFor={id} className="mb-1.5 block text-[12.5px] font-medium text-ink-2">

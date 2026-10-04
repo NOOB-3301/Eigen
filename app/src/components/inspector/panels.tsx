@@ -1,11 +1,14 @@
 "use client";
 import { useState } from "react";
-import { CalendarClock, FolderCog, Lock, Plug, ShieldCheck, Sparkles } from "lucide-react";
-import type { AgentSummary } from "@eigen/engine/schema";
+import { CalendarClock, FolderCog, Plug, ShieldCheck, Sparkles } from "lucide-react";
+import type { AgentRuntime, AgentSummary, ResolvedAgent } from "@eigen/engine/schema";
 import type { RootInfo } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { Segmented, Switch } from "@/components/ui";
+import type { SettingsSection } from "@/components/settings/settings-dialog";
 import { ChipToggle, Field, NumberInput, Provenance, Section, SwitchRow, TextField, getPath, inputCls, useForm } from "./fields";
+import { PrivateServers } from "./private-servers";
+import { TelegramSection } from "./telegram-section";
 
 export type PanelProps = {
   id: string;
@@ -14,11 +17,16 @@ export type PanelProps = {
   instructionsText: string;
   setInstructions: (t: string) => void;
   hasInstructionsFile: boolean;
+  runtime?: AgentRuntime;
+  /** What the engine last resolved for this agent; null while its file is invalid. */
+  resolved?: ResolvedAgent | null;
+  engineOnline: boolean;
+  openSettings: (section: SettingsSection) => void;
 };
 
 /* ---------------------------------------------------------------------------------------------- */
 
-export function OverviewPanel({ id, root, agents }: PanelProps) {
+export function OverviewPanel({ id, root, agents, runtime, resolved, engineOnline, openSettings }: PanelProps) {
   const { config, set } = useForm();
   const model = getPath(config, "model") as string | undefined;
   const primary = getPath(config, "primary") === true;
@@ -104,6 +112,7 @@ export function OverviewPanel({ id, root, agents }: PanelProps) {
         </Field>
       </Section>
 
+      <TelegramSection id={id} runtime={runtime} resolved={resolved} root={root} engineOnline={engineOnline} openSettings={openSettings} />
     </>
   );
 }
@@ -196,7 +205,6 @@ export function ToolsPanel({ root }: PanelProps) {
   const { config, set } = useForm();
   const builtin = (getPath(config, "tools.builtin") as string[] | undefined) ?? ["workspace"];
   const inherit = (getPath(config, "tools.mcp.inherit") as "all" | "none" | string[] | undefined) ?? "none";
-  const own = (getPath(config, "tools.mcp.servers") as Record<string, { trusted?: boolean; enabled?: boolean; url?: string; command?: string }> | undefined) ?? {};
   const mode = Array.isArray(inherit) ? "pick" : inherit;
   const picked = Array.isArray(inherit) ? inherit : [];
 
@@ -262,21 +270,8 @@ export function ToolsPanel({ root }: PanelProps) {
           </ul>
         )}
       </Section>
-      <Section title="Private tool servers" hint="Servers only this agent connects to. Edit them in Advanced.">
-        {Object.keys(own).length === 0 ? (
-          <p className="text-[12.5px] text-ink-3">None.</p>
-        ) : (
-          <ul className="grid gap-1.5">
-            {Object.entries(own).map(([name, s]) => (
-              <li key={name} className="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2">
-                <Lock size={12} className="text-ink-3" />
-                <span className="font-mono text-[12.5px] text-ink">{name}</span>
-                <span className="truncate text-[11.5px] text-ink-3">{s.url ? "remote" : "local process"}</span>
-                {s.trusted && <ShieldCheck size={12} className="ml-auto text-ok" aria-label="trusted" />}
-              </li>
-            ))}
-          </ul>
-        )}
+      <Section title="Private tool servers" hint="MCP servers only this agent connects to. They are not shared with the rest of the team.">
+        <PrivateServers rootNames={root?.mcpServers.map((m) => m.name) ?? []} />
       </Section>
     </>
   );

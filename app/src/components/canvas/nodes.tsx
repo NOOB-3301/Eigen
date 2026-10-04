@@ -3,13 +3,15 @@ import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { motion, useReducedMotion } from "motion/react";
 import { AlertTriangle, Crown, FolderCog, CalendarClock, Plug, Send, ShieldCheck, Sparkles } from "lucide-react";
-import type { AgentSummary } from "@eigen/engine/schema";
+import type { AgentSummary, TelegramState } from "@eigen/engine/schema";
 import { cn } from "@/lib/cn";
 import { Monogram, STATUS, StatusDot, spring } from "@/components/ui";
+import { TelegramDot, telegramView } from "./telegram-state";
 
 type Common = { leaving?: boolean; enterDelay?: number; dimmed?: boolean };
 export type AgentNodeData = AgentSummary & { builtinTools: string[]; overrides: string[]; selected?: boolean } & Common;
-export type ChannelNodeData = { channel: "telegram"; routesTo: string } & Common;
+/** One Telegram bot, wired to the agent it answers as. `offline`: the engine is not running, so `state` is only what the config implies. */
+export type ChannelNodeData = { channel: "telegram"; routesTo: string; tokenEnv?: string; state: TelegramState; username?: string; offline?: boolean } & Common;
 export type McpNodeData = { name: string; owner: string; trusted: boolean; error?: string } & Common;
 
 export type AgentNode = Node<AgentNodeData, "agent">;
@@ -123,15 +125,31 @@ export const AgentNodeView = memo(function AgentNodeView({ data, selected }: Nod
 });
 
 export const ChannelNodeView = memo(function ChannelNodeView({ data }: NodeProps<ChannelNode>) {
+  const view = telegramView({ state: data.state, username: data.username }, { enabled: true, engineOffline: data.offline });
+  const title = view.tone === "polling" && data.username ? `@${data.username}` : "Telegram bot";
+  // The handle is already the title when live, so the state line says "Live" instead of repeating it.
+  const stateText = view.tone === "polling" ? "Live" : view.label;
   return (
     <Shell data={data}>
-      <div className="flex w-[208px] items-center gap-3 rounded-[var(--radius-module)] border border-routes/40 bg-panel p-3 shadow-float">
-        <span className="grid size-9 place-items-center rounded-full bg-routes/15 text-routes">
+      <div
+        className={cn(
+          "flex w-[224px] items-center gap-3 rounded-[var(--radius-module)] border bg-panel p-3 shadow-float",
+          view.tone === "error" ? "border-tg-error/50" : view.tone === "missing" ? "border-tg-missing/50" : "border-routes/40",
+        )}
+        title={view.detail}
+      >
+        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-routes/15 text-routes">
           <Send size={16} strokeWidth={2} className="-translate-x-px translate-y-px" />
         </span>
-        <div className="min-w-0">
-          <div className="text-[14px] font-semibold text-ink">Telegram</div>
-          <div className="truncate text-[12px] text-ink-2">{data.routesTo ? `Default: ${data.routesTo}` : "No primary agent"}</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-[14px] font-semibold text-ink">{title}</span>
+            <span className="ml-auto">
+              <TelegramDot tone={view.tone} />
+            </span>
+          </div>
+          <div className={cn("truncate text-[12px]", view.tone === "error" ? "text-bad" : view.tone === "missing" ? "text-warn" : "text-ink-2")}>{stateText}</div>
+          <div className="truncate font-mono text-[11px] text-ink-3">{data.tokenEnv ?? "no token variable"}</div>
         </div>
         <Handle type="source" position={Position.Right} className="!border-routes !bg-panel" />
       </div>

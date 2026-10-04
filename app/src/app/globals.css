@@ -29,6 +29,11 @@
   --cable-routes: #b07d0a;
   --cable-delegates: #0c8f84;
   --cable-uses: #7a8296;
+  --tg-polling: #18915a;
+  --tg-starting: #4453d6;
+  --tg-missing: #b5620e;
+  --tg-error: #cf3540;
+  --tg-off: #8a92a3;
   --shadow-float: 0 1px 0 rgb(255 255 255 / 0.6) inset, 0 12px 32px -12px rgb(21 25 34 / 0.22), 0 2px 6px -2px rgb(21 25 34 / 0.12);
   --scrim: rgb(21 25 34 / 0.32);
   --mono-fg: 0.5;
@@ -59,6 +64,11 @@
     --cable-routes: #e6b450;
     --cable-delegates: #4fd1c5;
     --cable-uses: #7d8499;
+    --tg-polling: #4cd391;
+    --tg-starting: #9aa5ff;
+    --tg-missing: #f3a54b;
+    --tg-error: #f4656e;
+    --tg-off: #6b7486;
     --shadow-float: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 16px 40px -12px rgb(0 0 0 / 0.6), 0 2px 8px -2px rgb(0 0 0 / 0.4);
     --scrim: rgb(5 7 10 / 0.55);
     --mono-fg: 0.86;
@@ -89,6 +99,11 @@
   --cable-routes: #e6b450;
   --cable-delegates: #4fd1c5;
   --cable-uses: #7d8499;
+  --tg-polling: #4cd391;
+  --tg-starting: #9aa5ff;
+  --tg-missing: #f3a54b;
+  --tg-error: #f4656e;
+  --tg-off: #6b7486;
   --shadow-float: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 16px 40px -12px rgb(0 0 0 / 0.6), 0 2px 8px -2px rgb(0 0 0 / 0.4);
   --scrim: rgb(5 7 10 / 0.55);
   --mono-fg: 0.86;
@@ -118,6 +133,11 @@
   --color-routes: var(--cable-routes);
   --color-delegates: var(--cable-delegates);
   --color-uses: var(--cable-uses);
+  --color-tg-polling: var(--tg-polling);
+  --color-tg-starting: var(--tg-starting);
+  --color-tg-missing: var(--tg-missing);
+  --color-tg-error: var(--tg-error);
+  --color-tg-off: var(--tg-off);
   --shadow-float: var(--shadow-float);
   --font-sans: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-code), ui-monospace, "SF Mono", Menlo, monospace;

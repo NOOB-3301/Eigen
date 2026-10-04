@@ -12,6 +12,7 @@ import { issuesByPath, validateDraft } from "@/lib/client/validate";
 import { lineDiff } from "@/lib/client/diff";
 import { cn } from "@/lib/cn";
 import { Button, Kbd, Modal, Monogram, Skeleton, StatusBadge, Switch, spring } from "@/components/ui";
+import type { SettingsSection } from "@/components/settings/settings-dialog";
 import { Form, setPath, type FormCtx } from "./fields";
 import { AdvancedPanel, MemoryPanel, OverviewPanel, PromptPanel, ToolsPanel, type PanelProps } from "./panels";
 
@@ -60,11 +61,12 @@ type Props = {
   root?: RootInfo;
   engineOnline: boolean;
   onClose: () => void;
+  onOpenSettings: (section: SettingsSection) => void;
   className?: string;
   style?: React.CSSProperties;
 };
 
-export function Inspector({ id, fleet, root, engineOnline, onClose, className, style }: Props) {
+export function Inspector({ id, fleet, root, engineOnline, onClose, onOpenSettings, className, style }: Props) {
   const { data, error, mutate: refetch } = useAgent(id);
   const { mutate } = useSWRConfig();
   const reduce = useReducedMotion();
@@ -266,6 +268,10 @@ export function Inspector({ id, fleet, root, engineOnline, onClose, className, s
       setPhase((p) => (p.k === "idle" || p.k === "saving" || p.k === "waiting" || p.k === "conflict" ? p : { k: "idle" }));
     },
     hasInstructionsFile: data?.instructionsText !== null,
+    runtime,
+    resolved: data?.resolved,
+    engineOnline,
+    openSettings: onOpenSettings,
   };
 
   return (
