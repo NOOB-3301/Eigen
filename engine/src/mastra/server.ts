@@ -96,6 +96,8 @@ export default {
         return Response.json(await checkTelegramToken(process.env[tokenEnv], process.env.TELEGRAM_API_BASE_URL));
       }),
     }),
+    // [triggers worker] routes: GET /eigen/agents/:id/triggers/runs, POST /eigen/agents/:id/triggers/:triggerId/run, POST /eigen/github/check
+    // [chat worker] route: the agent chat endpoint
     // One tiny prompt to a model in config.json.
     registerApiRoute("/eigen/models/:key/test", {
       method: "POST",

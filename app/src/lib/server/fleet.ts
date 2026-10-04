@@ -166,5 +166,5 @@ export async function agentDetail(id: string): Promise<GetAgentResponse | null> 
   }
   const live = await engineSnapshot(800);
   const runtime: AgentRuntime = live?.agents.find((s) => s.id === id)?.runtime ?? { status: "offline", problems };
-  return { config: a.config, resolved, instructionsText: a.instructionsText, runtime: { ...runtime, problems: runtime.problems.map(scrubPaths) }, etag: a.etag };
+  return { config: a.config, resolved, instructionsText: a.instructionsText, soulText: null, runtime: { ...runtime, problems: runtime.problems.map(scrubPaths) }, etag: a.etag };
 }

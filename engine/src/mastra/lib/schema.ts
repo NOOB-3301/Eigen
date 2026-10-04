@@ -26,6 +26,51 @@ const AgentMcpRemote = z.object({ url: z.url(), headers: strMap.optional(), tran
 /** Tools that are code in the engine, not MCP. The allowlist is what an agent may use. */
 export const BUILTIN_TOOLS = ["workspace", "schedule", "skills"] as const;
 
+/** A slug for a skill folder under ~/.eigen/skills: "pdf", or "@owner/slug" for ClawHub installs. Also the name an agent's `skills.inherit` lists. Never contains "..", a leading dot, or a backslash. */
+export const SkillSlug = z.string().max(100).regex(/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9]+(-[a-z0-9]+)*$/, "lowercase slug such as pdf-tools, or @owner/slug");
+export const TriggerId = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase slug: a-z, 0-9, '-', max 32 chars");
+const CRON_FIELDS = /^\s*\S+(\s+\S+){4}\s*$/;
+
+/**
+ * What a trigger's `prompt` may reference as {{name}}. The engine fills them from the event and always wraps the event data (not the prompt) in an
+ * <event> block it tells the agent to treat as untrusted DATA: a PR title or body is written by someone else and can try to give the agent orders.
+ */
+export const TRIGGER_PLACEHOLDERS = {
+  cron: ["now", "date", "time"],
+  "github-pr": ["event", "repo", "pr.number", "pr.title", "pr.url", "pr.author", "pr.base", "pr.head", "pr.draft", "pr.body"],
+} as const;
+
+const triggerCommon = {
+  id: TriggerId,
+  enabled: z.boolean().default(true),
+  /** What to do when it fires, written as an instruction to the agent, with optional {{placeholders}} (TRIGGER_PLACEHOLDERS). */
+  prompt: z.string().min(1).max(4000),
+  /** Send the agent's final reply to its Telegram allow-list. Skipped (and logged) when the agent has no running bot. The run log always keeps the reply. */
+  deliverToTelegram: z.boolean().default(true),
+};
+
+/**
+ * Something that wakes an agent up on its own. Defined in the agent's config.json, hot reloaded with it, and stopped when the agent is replaced or trashed.
+ * cron: a five-field cron expression in `timezone` (default: the root timezone).
+ * github-pr: polls the GitHub REST API for pull requests of one repo with the token in `tokenEnv` (a .env variable NAME; the token never goes in a config file).
+ *   The first poll only records the PRs that are already open; it never fires for them.
+ */
+export const TriggerSchema = z.discriminatedUnion("type", [
+  z.object({ ...triggerCommon, type: z.literal("cron"), cron: z.string().regex(CRON_FIELDS, "five fields: minute hour day-of-month month weekday"), timezone: z.string().min(1).max(64).optional() }),
+  z.object({
+    ...triggerCommon,
+    type: z.literal("github-pr"),
+    repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "owner/name"),
+    tokenEnv: z.string().regex(ENV_NAME, "upper-case env var name, e.g. GITHUB_TOKEN"),
+    /** opened: a PR the poller has not seen. updated: a seen PR whose head commit changed. */
+    events: z.array(z.enum(["opened", "updated"])).min(1).default(["opened"]),
+    intervalSec: z.number().int().min(60).max(3600).default(300),
+    includeDrafts: z.boolean().default(false),
+  }),
+]);
+export type Trigger = z.infer<typeof TriggerSchema>;
+export type TriggerInput = z.input<typeof TriggerSchema>;
+
 export const AgentConfigSchema = z
   .object({
     schemaVersion: z.literal(AGENT_SCHEMA_VERSION).default(AGENT_SCHEMA_VERSION),
@@ -71,7 +116,8 @@ export const AgentConfigSchema = z
       .object({
         /** isolated: own threads + working memory. shared: same resource as the primary (sees the user's profile). */
         scope: z.enum(["isolated", "shared"]).default("isolated"),
-        lastMessages: posInt.optional(),
+        /** 0 turns the recent-message history off (the agent then sees only the current message plus whatever recall and observation give it). */
+        lastMessages: z.number().int().min(0).optional(),
         semanticRecall: z.object({ enabled: z.boolean(), topK: posInt, messageRange: posInt }).partial().optional(),
         observational: z.object({ enabled: z.boolean() }).partial().optional(),
       })
@@ -100,12 +146,30 @@ export const AgentConfigSchema = z
         allowedUserIds: z.array(z.number().int()).optional(),
       })
       .prefault({}),
+    /**
+     * The persona block of the prompt. shared: ~/.eigen/SOUL.md. own: `file` in this agent's folder (soul.md). none: no soul.
+     * Omitted `source` follows `instructions.includeSoul` (true = shared), so existing configs keep working.
+     */
+    soul: z
+      .object({
+        source: z.enum(["shared", "own", "none"]).optional(),
+        file: z.string().regex(/\.md$/, "must be a .md file").default("soul.md"),
+      })
+      .prefault({}),
+    /** Which skills from ~/.eigen/skills this agent can load (needs the workspace tool). all = today's behaviour. The agent's own sandbox/skills always stay available. */
+    skills: z
+      .object({
+        inherit: z.union([z.literal("all"), z.literal("none"), z.array(SkillSlug)]).default("all"),
+      })
+      .prefault({}),
+    triggers: z.array(TriggerSchema).default([]),
   })
   .refine((a) => !(a.primary && a.delegation.acceptsFrom === "primary"), {
     path: ["delegation", "acceptsFrom"],
     message: 'the primary cannot accept delegation "from primary"; use "none" or "any"',
   })
-  .refine((a) => !a.delegation.canDelegateTo.includes(a.id), { path: ["delegation", "canDelegateTo"], message: "an agent cannot delegate to itself" });
+  .refine((a) => !a.delegation.canDelegateTo.includes(a.id), { path: ["delegation", "canDelegateTo"], message: "an agent cannot delegate to itself" })
+  .refine((a) => new Set(a.triggers.map((t) => t.id)).size === a.triggers.length, { path: ["triggers"], message: "trigger ids must be unique within an agent" });
 
 export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
@@ -143,11 +207,24 @@ export type ResolvedAgent = {
   sandboxMode: AgentConfig["sandbox"]["mode"];
   delegation: AgentConfig["delegation"];
   telegram: ResolvedTelegram;
+  /** `source` is already resolved against instructions.includeSoul. `file` is only read when source is "own". */
+  soul: { source: NonNullable<AgentConfig["soul"]["source"]>; file: string };
+  skills: AgentConfig["skills"];
+  triggers: Trigger[];
   /** Dotted path -> where the effective value came from. Only for fields an agent can override. */
   provenance: Record<string, Source>;
 };
 
 const from = (v: unknown): Source => (v === undefined ? "root" : "agent");
+
+const validTimezone = (zone: string) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** Cross-checks references against the root config. Returns problems instead of throwing so the UI can show all of them. */
 export function agentProblems(a: AgentConfig, root: Config): string[] {
@@ -158,6 +235,8 @@ export function agentProblems(a: AgentConfig, root: Config): string[] {
   Object.keys(a.tools.mcp.servers)
     .filter((n) => n in root.mcpServers)
     .forEach((n) => problems.push(`tools.mcp.servers.${n} shadows a root mcpServer; rename it or inherit the root one`));
+  for (const t of a.triggers)
+    if (t.type === "cron" && t.timezone && !validTimezone(t.timezone)) problems.push(`triggers.${t.id}.timezone: "${t.timezone}" is not a time zone`);
   if (a.telegram.enabled && !a.primary && !a.telegram.tokenEnv) problems.push("telegram.tokenEnv: name the .env variable that holds this agent's bot token");
   if (a.telegram.enabled && (a.telegram.allowedUserIds ?? root.telegram.allowedUserIds).length === 0) problems.push("telegram: no allowed user ids (set telegram.allowedUserIds here or in root config.json); the bot would answer anyone");
   return problems;
@@ -202,6 +281,9 @@ export function resolveAgent(a: AgentConfig, root: Config): ResolvedAgent {
     sandboxMode: a.sandbox.mode,
     delegation: a.delegation,
     telegram: resolveAgentTelegram(a, root),
+    soul: { source: a.soul.source ?? (a.instructions.includeSoul ? "shared" : "none"), file: a.soul.file },
+    skills: a.skills,
+    triggers: a.triggers,
     provenance: {
       model: from(a.model),
       "limits.maxSteps": from(a.limits.maxSteps),
@@ -274,9 +356,39 @@ export type TelegramState = "off" | "missing-token" | "starting" | "polling" | "
 /** `restartRequired`: the primary's bot is built once at boot, so a change to its root token / allow-list applies only after an engine restart. */
 export type TelegramRuntime = { state: TelegramState; username?: string; error?: string; restartRequired?: boolean };
 
+/**
+ * idle:          waiting for the next cron time / poll.
+ * running:       the agent is working on a fired event right now.
+ * error:         the last poll or run failed; `error` says why (the trigger keeps trying).
+ * disabled:      trigger or agent has enabled=false.
+ * missing-token: github-pr whose tokenEnv is not set in .env.
+ */
+export type TriggerState = "idle" | "running" | "error" | "disabled" | "missing-token";
+
+/** One firing. Replies and errors are redacted (lib/secrets.ts) and truncated before they are stored or returned. */
+export type TriggerRun = {
+  id: string;
+  agentId: string;
+  triggerId: string;
+  type: Trigger["type"];
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "ok" | "error";
+  /** What fired it: "manual", "cron 0 9 * * *", or "owner/repo#12 opened". */
+  subject: string;
+  reply?: string;
+  error?: string;
+  /** Whether the reply reached Telegram. undefined = not asked to (or still running). */
+  delivered?: boolean;
+};
+
+export type TriggerRuntime = { id: string; type: Trigger["type"]; state: TriggerState; nextRunAt?: string; lastRun?: TriggerRun; error?: string };
+
 export type AgentRuntime = {
   status: AgentStatus;
   telegram?: TelegramRuntime;
+  /** One entry per trigger in the agent's config. */
+  triggers?: TriggerRuntime[];
   problems: string[];
   /** sha256 of the normalized config + instructions text currently registered. */
   loadedHash?: string;
@@ -298,6 +410,8 @@ export type GetAgentResponse = {
   /** Null when the config is invalid. */
   resolved: ResolvedAgent | null;
   instructionsText: string | null;
+  /** The agent's own soul file (config.soul.file) when it exists, else null. Written back through UpdateAgentConfigRequest.soulText. */
+  soulText: string | null;
   runtime: AgentRuntime;
   /** Opaque version for optimistic concurrency (hash of the file bytes). */
   etag: string;
@@ -310,6 +424,8 @@ export type GetAgentRuntimeResponse = { id: string; runtime: AgentRuntime; resol
 export const UpdateAgentConfigRequest = z.object({
   config: z.unknown(),
   instructionsText: z.string().optional(),
+  /** Writes the agent's own soul file (config.soul.file, inside the agent folder). Applies on the agent's next message; no reload needed. */
+  soulText: z.string().max(100_000).optional(),
   etag: z.string().optional(),
 });
 export type UpdateAgentConfigRequest = z.infer<typeof UpdateAgentConfigRequest>;
@@ -353,6 +469,7 @@ export function agentEnvNames(r: ResolvedAgent, root: Pick<Config, "models">): s
   add(r.memory.embedder.apiKeyEnv);
   for (const key of [r.memory.observational.model, r.memory.knowledge.model]) add(key ? root.models[key]?.apiKeyEnv : undefined);
   for (const srv of Object.values(r.mcp.own)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach(add);
+  for (const t of r.triggers) if (t.enabled && t.type === "github-pr") add(t.tokenEnv);
   return [...names].sort();
 }
 
@@ -366,6 +483,7 @@ export function referencedEnvNames(root: Config, agents: AgentConfig[] = []): Ma
   for (const [n, srv] of Object.entries(root.mcpServers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `mcpServers.${n}`));
   for (const a of agents) {
     if (a.telegram.tokenEnv) add(a.telegram.tokenEnv, `agents.${a.id}.telegram`);
+    for (const t of a.triggers) if (t.type === "github-pr") add(t.tokenEnv, `agents.${a.id}.triggers.${t.id}`);
     for (const [n, srv] of Object.entries(a.tools.mcp.servers)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach((e) => add(e, `agents.${a.id}.mcp.${n}`));
   }
   return out;
@@ -378,7 +496,9 @@ export type AgentEvent =
   | { type: "agent.error"; id: string; problems: string[]; stale: boolean }
   | { type: "fleet.changed"; rev: string }
   /** A bot started, stopped, failed, or learned its @username. Sent for the primary too. */
-  | { type: "agent.telegram"; id: string; telegram: TelegramRuntime };
+  | { type: "agent.telegram"; id: string; telegram: TelegramRuntime }
+  /** A trigger changed state or finished a run (`trigger.lastRun`). */
+  | { type: "agent.trigger"; id: string; trigger: TriggerRuntime };
 
 /** Engine POST /eigen/telegram/check, studio POST /api/telegram/check: calls getMe with the token in that env var. Never returns the token. */
 export const TelegramCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME) });
@@ -387,6 +507,54 @@ export type TelegramCheckResponse = { ok: boolean; username?: string; error?: st
 
 /** Engine POST /eigen/models/:key/test, studio POST /api/models/:key/test: one tiny prompt to that root model, 20s timeout. Errors are redacted. */
 export type ModelTestResponse = { ok: boolean; ms: number; reply?: string; error?: string };
+
+/* ------------------------------------------------------------------------------------------------ */
+/* Skill library, shared soul, triggers: DTOs.                                                        */
+/* The studio reads and writes ~/.eigen files itself (lib/store.ts); only runtime state comes from the engine. */
+/* ------------------------------------------------------------------------------------------------ */
+
+/** user: created in the studio or by hand under ~/.eigen/skills/<slug>/ (editable). clawhub: installed under @owner/slug (shown read-only). */
+export type SkillOrigin = "user" | "clawhub";
+export type SkillSummary = {
+  slug: string;
+  name: string;
+  description: string;
+  origin: SkillOrigin;
+  /** Why Mastra would skip this skill (bad or missing frontmatter, name does not match the folder, ...). The editor shows it. */
+  problem?: string;
+  /** Ids of the agents whose `skills.inherit` lists it by name (agents on "all" are not counted). */
+  usedBy: string[];
+};
+/** GET /api/skills */
+export type ListSkillsResponse = { skills: SkillSummary[] };
+/** GET /api/skills/:slug (slug is URL-encoded: "@owner/slug" has a slash). `files` are the other files in the folder, names only, read-only here. */
+export type GetSkillResponse = { slug: string; text: string; etag: string; origin: SkillOrigin; files: string[]; problem?: string };
+/** PUT /api/skills/:slug: replaces SKILL.md. 200 { ok, etag } | 400 { ok:false, issues } | 409 changed since GET | 403 for a clawhub skill. */
+export const WriteSkillRequest = z.object({ text: z.string().min(1).max(100_000), etag: z.string().optional() });
+export type WriteSkillRequest = z.infer<typeof WriteSkillRequest>;
+/** POST /api/skills: scaffolds ~/.eigen/skills/<slug>/SKILL.md with frontmatter (name = slug) and, when `text` is omitted, a starter body. 409 if the slug exists. */
+export const CreateSkillRequest = z.object({ slug: SkillSlug.refine((s) => !s.startsWith("@"), "new skills cannot use @owner/ (that is ClawHub's layout)"), description: z.string().min(1).max(1024), text: z.string().max(100_000).optional() });
+export type CreateSkillRequest = z.infer<typeof CreateSkillRequest>;
+export type SkillWriteResponse = { ok: true; etag: string; slug?: string } | { ok: false; issues?: string[]; etag?: string };
+
+/** GET /api/soul, PUT /api/soul: the shared ~/.eigen/SOUL.md that every agent on `soul.source: "shared"` reads on each turn. */
+export type GetSharedSoulResponse = { text: string; etag: string };
+export const WriteSharedSoulRequest = z.object({ text: z.string().max(100_000), etag: z.string().optional() });
+export type WriteSharedSoulRequest = z.infer<typeof WriteSharedSoulRequest>;
+export type SharedSoulWriteResponse = { ok: true; etag: string } | { ok: false; issues?: string[]; etag?: string };
+
+/** Engine GET /eigen/agents/:id/triggers/runs?limit=50, studio GET /api/agents/:id/triggers/runs: newest first, at most 200. */
+export type ListTriggerRunsResponse = { runs: TriggerRun[] };
+/**
+ * Engine POST /eigen/agents/:id/triggers/:triggerId/run, studio POST /api/agents/:id/triggers/:triggerId/run: fire it now.
+ * cron: runs the prompt. github-pr: runs it for the most recently updated open PR (error if there is none), without touching the poller's seen-list.
+ * Resolves when the run has finished (max 5 minutes).
+ */
+export type RunTriggerResponse = { ok: boolean; run?: TriggerRun; error?: string };
+/** Engine POST /eigen/github/check, studio POST /api/github/check: can the token in that env var read that repo's pull requests? Never returns the token. */
+export const GithubCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME), repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) });
+export type GithubCheckRequest = z.infer<typeof GithubCheckRequest>;
+export type GithubCheckResponse = { ok: boolean; login?: string; openPulls?: number; error?: string };
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Topology (React Flow). Positions are NOT here: they live in data/topology-layout.json.            */
