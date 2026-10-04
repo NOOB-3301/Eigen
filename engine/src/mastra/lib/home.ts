@@ -32,6 +32,8 @@ export function homePaths(home = eigenHome()) {
     groundRulesHistoryDir: join(dataDir, "groundrules-history"),
     memoryDir: join(home, "memory"),
     dataDir,
+    /** Trigger state, one folder per agent: runs.jsonl (history) and <trigger>.seen.json (the pull requests already seen). Created on first use. */
+    triggersDir: join(dataDir, "triggers"),
     dbFile: join(dataDir, "eigen.db"),
     logsDir,
     logFile: join(logsDir, "eigen.log"),

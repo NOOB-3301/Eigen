@@ -3,8 +3,9 @@ import { registerApiRoute } from "@mastra/core/server";
 import { loadConfig } from "./lib/config.ts";
 import { paths, registry } from "./lib/fleet.ts";
 import { denyEngineRequest } from "./lib/guard.ts";
-import { checkTelegramToken, telegramEnvAllowed, testModel } from "./lib/probes.ts";
-import { TelegramCheckRequest, type AgentEvent, type ModelTestResponse, type TelegramCheckResponse } from "./lib/schema.ts";
+import { checkGithubToken } from "./lib/github.ts";
+import { checkTelegramToken, githubEnvAllowed, telegramEnvAllowed, testModel } from "./lib/probes.ts";
+import { GithubCheckRequest, TelegramCheckRequest, type AgentEvent, type GithubCheckResponse, type ListTriggerRunsResponse, type ModelTestResponse, type RunTriggerResponse, type TelegramCheckResponse } from "./lib/schema.ts";
 
 const KEEPALIVE_MS = 25_000;
 const PORT = Number(process.env.EIGEN_PORT ?? 4111);
@@ -96,8 +97,56 @@ export default {
         return Response.json(await checkTelegramToken(process.env[tokenEnv], process.env.TELEGRAM_API_BASE_URL));
       }),
     }),
-    // [triggers worker] routes: GET /eigen/agents/:id/triggers/runs, POST /eigen/agents/:id/triggers/:triggerId/run, POST /eigen/github/check
-    // [chat worker] route: the agent chat endpoint
+    // [triggers worker] Run history of an agent's triggers, newest first (at most 200).
+    registerApiRoute("/eigen/agents/:id/triggers/runs", {
+      method: "GET",
+      cors,
+      createHandler: route(async (c) => {
+        const limit = Math.min(Math.max(Number(new URL(c.req.raw.url).searchParams.get("limit")) || 50, 1), 200);
+        const runs = registry.triggerRuns(c.req.param("id"), limit);
+        return runs ? Response.json({ runs } satisfies ListTriggerRunsResponse) : Response.json({ error: "no such agent" }, { status: 404 });
+      }),
+    }),
+    // Fires a trigger now; answers when the run is over (up to 5 minutes).
+    registerApiRoute("/eigen/agents/:id/triggers/:triggerId/run", {
+      method: "POST",
+      cors,
+      createHandler: route(async (c) => {
+        const run = registry.runTrigger(c.req.param("id"), c.req.param("triggerId"));
+        return run ? Response.json((await run) satisfies RunTriggerResponse) : Response.json({ ok: false, error: "no such agent or trigger" } satisfies RunTriggerResponse, { status: 404 });
+      }),
+    }),
+    // Can the token in this .env variable read this repo's pull requests? Only GITHUB_* variables and the ones a github-pr trigger names may be read, and the request only ever goes to GitHub.
+    registerApiRoute("/eigen/github/check", {
+      method: "POST",
+      cors,
+      createHandler: route(async (c) => {
+        const body = GithubCheckRequest.safeParse(await readJson(c.req.raw));
+        if (!body.success) return Response.json({ ok: false, error: "tokenEnv must be an upper-case variable name such as GITHUB_TOKEN, and repo must look like owner/name" } satisfies GithubCheckResponse, { status: 400 });
+        const { tokenEnv, repo } = body.data;
+        if (!githubEnvAllowed(tokenEnv, registry.githubEnvNames()))
+          return Response.json({ ok: false, error: `${tokenEnv} is not a GitHub token variable (its name must start with GITHUB_, or a github-pr trigger must name it as its token)` } satisfies GithubCheckResponse, { status: 400 });
+        registry.syncEnvNow();
+        return Response.json(await checkGithubToken(process.env[tokenEnv], repo));
+      }),
+    }),
+    // [chat worker] Studio chat (lib/chat.ts): POST streams the agent's reply as an AI SDK UI-message stream, GET returns a session's earlier messages.
+    registerApiRoute("/eigen/chat/:id", {
+      method: "POST",
+      cors,
+      createHandler: async (o) => {
+        const chat = await import("./lib/chat.ts").then((m) => m.studioChat());
+        return route((c) => chat.stream(o.mastra, c.req.raw, c.req.param("id")))(o);
+      },
+    }),
+    registerApiRoute("/eigen/chat/:id/:session", {
+      method: "GET",
+      cors,
+      createHandler: async (o) => {
+        const chat = await import("./lib/chat.ts").then((m) => m.studioChat());
+        return route((c) => chat.history(o.mastra, c.req.param("id"), c.req.param("session")))(o);
+      },
+    }),
     // One tiny prompt to a model in config.json.
     registerApiRoute("/eigen/models/:key/test", {
       method: "POST",

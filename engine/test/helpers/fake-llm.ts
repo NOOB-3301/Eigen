@@ -1,7 +1,15 @@
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-export type Turn = { text?: string; calls?: Array<{ name: string; args: Record<string, unknown> }>; delayMs?: number };
+export type RecordedRequest = { model?: string; messages: Array<Record<string, any>>; tools?: Array<{ function: { name: string } }> };
+
+export type Turn = {
+  text?: string;
+  calls?: Array<{ name: string; args: Record<string, unknown> }>;
+  delayMs?: number;
+  /** Answers every request it matches, wherever the request falls in the script (agents that run in parallel make the order unpredictable). Turns without it are used in order. */
+  when?: (request: RecordedRequest) => boolean;
+};
 
 const chunk = (delta: object, finish: string | null = null) => ({
   id: "chatcmpl-fake",
@@ -34,9 +42,10 @@ export function embed(text: string) {
   return v.map((x) => x / norm);
 }
 
-/** A scripted OpenAI-compatible server. Each request consumes the next turn (the last one repeats). */
+/** A scripted OpenAI-compatible server. Each request consumes the next turn (the last one repeats), unless a turn with `when` matches it. */
 export async function fakeLlm(turns: Turn[]) {
-  const requests: Array<{ model?: string; messages: Array<Record<string, any>>; tools?: Array<{ function: { name: string } }> }> = [];
+  const requests: RecordedRequest[] = [];
+  const ordered = turns.filter((t) => !t.when);
   const embeddings: string[] = [];
   let i = 0;
   const server = createServer((req, res) => {
@@ -51,7 +60,7 @@ export async function fakeLlm(turns: Turn[]) {
         return res.end(JSON.stringify({ object: "list", model: "fake-embed", data: inputs.map((t, index) => ({ object: "embedding", index, embedding: embed(t) })), usage: { prompt_tokens: 1, total_tokens: 1 } }));
       }
       requests.push(json);
-      const turn = turns[Math.min(i++, turns.length - 1)]!;
+      const turn = turns.find((t) => t.when?.(json)) ?? ordered[Math.min(i++, ordered.length - 1)] ?? {};
       const timer = setTimeout(() => !res.destroyed && send(res, !!json.stream, turn), turn.delayMs ?? 0);
       res.on("close", () => clearTimeout(timer));
     });

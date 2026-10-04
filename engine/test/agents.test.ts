@@ -373,8 +373,8 @@ describe("primary instructions settings", () => {
     const p = home();
     const at = new Date("2026-10-01T09:30:00Z");
     const classic = buildInstructions(p, "UTC", at);
-    expect(buildInstructions(p, "UTC", at, { text: readFileSync(p.systemPromptFile, "utf8").trim(), soul: true, memory: true })).toBe(classic);
-    const lean = buildInstructions(p, "UTC", at, { text: "Only this.", soul: false, memory: false });
+    expect(buildInstructions(p, "UTC", at, { text: readFileSync(p.systemPromptFile, "utf8").trim(), soul: readFileSync(p.soulFile, "utf8").trim(), memory: true })).toBe(classic);
+    const lean = buildInstructions(p, "UTC", at, { text: "Only this.", soul: "", memory: false });
     expect(lean).toContain("<operating_instructions>\nOnly this.\n</operating_instructions>");
     expect(lean).not.toContain("<soul>");
     expect(lean).not.toContain("<memory>");

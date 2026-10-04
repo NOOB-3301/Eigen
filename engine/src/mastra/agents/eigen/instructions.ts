@@ -3,11 +3,14 @@ import { agentInstructions } from "@mastra/core/agent";
 import { getConfig } from "../../lib/config.ts";
 import { paths, PRIMARY_ID, registry } from "../../lib/fleet.ts";
 import { buildInstructions, readText, type PrimaryPrompt } from "../../lib/instructions.ts";
+import { soulText } from "../../lib/soul.ts";
 
-/** The primary's `instructions` settings; with no loaded .agents/eigen it is the classic prompt (prompts/system.md + soul + memory). */
+/** The primary's settings; with no loaded .agents/eigen it is the classic prompt (prompts/system.md + shared soul + memory). */
 const prompt = (): PrimaryPrompt => {
-  const i = registry.resolved(PRIMARY_ID)?.instructions;
-  return i ? { text: i.inline ?? readText(join(paths.agentsDir, PRIMARY_ID, i.file)), soul: i.includeSoul, memory: i.includeMemoryFiles } : {};
+  const r = registry.resolved(PRIMARY_ID);
+  if (!r) return {};
+  const dir = join(paths.agentsDir, PRIMARY_ID);
+  return { text: r.instructions.inline ?? readText(join(dir, r.instructions.file)), soul: soulText(r.soul, paths, dir), memory: r.instructions.includeMemoryFiles };
 };
 
 export default agentInstructions(() => buildInstructions(paths, getConfig().timezone, undefined, prompt()));

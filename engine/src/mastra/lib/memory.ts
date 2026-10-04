@@ -15,6 +15,9 @@ export const WORKING_MEMORY_TEMPLATE = `# About the user
 - Standing instructions:
 `;
 
+/** Thread ids of trigger runs (lib/triggers.ts names them `trigger-<agent>-<trigger>`). */
+export const TRIGGER_THREAD_PREFIX = "trigger-";
+
 /** Turns started by a schedule (Moltbook heartbeat, Zomato checks) and the replies to them. Observing those would fill memory with bot chatter instead of what the user said. */
 export function dropScheduledTurns(messages: MastraDBMessage[]) {
   let skipping = false;
@@ -42,6 +45,8 @@ export function observerHooks() {
   const withoutSkills = skillResultRedactor();
   return {
     beforeObservation: async (input: Parameters<typeof withoutSkills>[0]) => {
+      // A trigger run reads text other people wrote (a pull request). It must not be distilled into the agent's long-term observations, where it would outlive the run and be read back as fact.
+      if (input.threadId?.startsWith(TRIGGER_THREAD_PREFIX)) return { messages: [] };
       const messages = (await withoutSkills(input))?.messages ?? input.messages;
       return { messages: clipStrings(redactDeep(dropScheduledTurns(messages))) };
     },
@@ -74,7 +79,8 @@ export function observationalOptions(getCfg: () => Config) {
     activateAfterIdle: om.activateAfterIdle,
     retrieval: om.retrieval && (semanticRecall.enabled ? { vector: true } : true),
     hooks: observerHooks(),
-    ...(kn.enabled && {
+    // Knowledge indexes into the vector store, which an agent that turned semantic recall off does not have (Memory refuses to build without it).
+    ...(kn.enabled && semanticRecall.enabled && {
       experimental_subconscious: new Subconscious({
         observation: ["remind", "curate"],
         model: knowledgeModel,
@@ -86,7 +92,11 @@ export function observationalOptions(getCfg: () => Config) {
   };
 }
 
-/** Working memory (profile, all threads) + semantic recall over past messages, and optionally Mastra's Observational Memory. Storage comes from storage.ts. Pass a config getter to let the observer model follow `/reload`; the rest is fixed when this runs. */
+/**
+ * Working memory (profile, all threads) + semantic recall over past messages, and optionally Mastra's Observational Memory. Storage comes from storage.ts.
+ * Each of the three switches is real: lastMessages 0 turns the recent-message history off (Mastra spells that `false`), semanticRecall.enabled false
+ * builds no vector store or embedder, observational.enabled false builds no Observer. Pass a config getter to let the observer model follow `/reload`; the rest is fixed when this runs.
+ */
 export function makeMemory(p: HomePaths, source: Config | (() => Config)) {
   const getCfg = typeof source === "function" ? source : () => source;
   const cfg = getCfg();
@@ -97,10 +107,23 @@ export function makeMemory(p: HomePaths, source: Config | (() => Config)) {
       embedder: new ModelRouterEmbeddingModel(toMastraModel(embedder)),
     }),
     options: {
-      lastMessages,
+      lastMessages: lastMessages > 0 && lastMessages,
       workingMemory: { enabled: true, scope: "resource", template: WORKING_MEMORY_TEMPLATE },
       semanticRecall: sr.enabled && { topK: sr.topK, messageRange: sr.messageRange, scope: "resource" },
       observationalMemory: observationalOptions(getCfg),
     },
   });
+}
+
+/**
+ * A memory that follows the config: it is rebuilt when a memory setting changes, and reused otherwise. For an agent Mastra builds once
+ * (the primary), this is what lets lastMessages, semantic recall and observation switch on or off without a restart.
+ */
+export function liveMemory(p: HomePaths, getCfg: () => Config) {
+  let built: { key: string; memory: Memory } | undefined;
+  return () => {
+    const key = JSON.stringify(getCfg().memory);
+    if (built?.key !== key) built = { key, memory: makeMemory(p, getCfg) };
+    return built.memory;
+  };
 }

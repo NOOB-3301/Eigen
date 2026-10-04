@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { TelegramRuntime } from "../src/mastra/lib/schema.ts";
-import { createBot, type TelegramBot } from "../src/mastra/lib/telegram.ts";
+import { createBot, telegramChannels, type TelegramBot } from "../src/mastra/lib/telegram.ts";
 import { fakeTelegram } from "./helpers/fake-telegram.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -92,5 +92,17 @@ describe("createBot", () => {
   it("never builds a bot without an allow-list (the adapter would answer anyone)", async () => {
     tg = await fakeTelegram();
     expect(() => createBot({ token: "11:x", allowedUserIds: [], apiBaseUrl: tg.url })).toThrow(/no allowed user ids/);
+  });
+});
+
+describe("whose memory a bot's chats belong to", () => {
+  const owner = (isolatedAs?: string) => {
+    const ch = telegramChannels({ adapter: {} as never }, { queue: {} as never, slash: (async () => undefined) as never, verbose: () => false, isolatedAs });
+    return ch.resolveResourceId?.({ defaultResourceId: "telegram:7" } as never);
+  };
+
+  it("keeps Mastra's per-user owner for the primary and shared agents, and gives an isolated agent its own", async () => {
+    expect(await owner()).toBeUndefined(); // no hook: Mastra's default telegram:<userId>
+    expect(await owner("researcher")).toBe("researcher:telegram:7");
   });
 });

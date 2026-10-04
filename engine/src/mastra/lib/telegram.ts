@@ -108,8 +108,13 @@ export function createBot({ token, allowedUserIds, apiBaseUrl = process.env.TELE
 }
 
 /** Message handling shared by the primary and specialist bots: per-chat queue, slash commands, Approve/Deny buttons, optional tool chatter. */
-export function telegramChannels(bot: Pick<TelegramBot, "adapter">, { queue, slash, verbose }: { queue: ChatQueue; slash: SlashCommandChannelHandler; verbose: () => boolean }): ChannelConfig {
+/**
+ * `isolatedAs`: the agent id of a specialist whose memory scope is "isolated". Mastra's default memory owner is `telegram:<userId>`, the same for every bot, so
+ * without this an isolated agent would share working memory with the primary. It becomes `<id>:telegram:<userId>`, the owner the studio chat uses too.
+ */
+export function telegramChannels(bot: Pick<TelegramBot, "adapter">, { queue, slash, verbose, isolatedAs }: { queue: ChatQueue; slash: SlashCommandChannelHandler; verbose: () => boolean; isolatedAs?: string }): ChannelConfig {
   return {
+    ...(isolatedAs && { resolveResourceId: ({ defaultResourceId }: { defaultResourceId: string }) => `${isolatedAs}:${defaultResourceId}` }),
     adapters: {
       telegram: {
         adapter: bot.adapter,

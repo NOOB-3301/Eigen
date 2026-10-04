@@ -6,6 +6,7 @@ import { makeChatQueue } from "../../lib/chat-queue.ts";
 import { slashHandler } from "../../lib/commands.ts";
 import { getConfig, toMastraModel, tokenBudget } from "../../lib/config.ts";
 import { mcp, paths, PRIMARY_ID, registry } from "../../lib/fleet.ts";
+import { liveMemory } from "../../lib/memory.ts";
 import { mergeSystemProcessor } from "../../lib/merge-system.ts";
 import { orgScopeProcessor } from "../../lib/org-scope.ts";
 import { createBot, telegramChannels } from "../../lib/telegram.ts";
@@ -28,6 +29,8 @@ registry.trackBot(PRIMARY_ID, bot, { tokenEnv: config.telegram.tokenEnv, allowed
 
 export default agentConfig({
   model: () => toMastraModel(model()),
+  // Root memory settings with the primary's own overrides (lastMessages, semanticRecall, observational) on top. Rebuilt when one of them changes, so no restart.
+  memory: liveMemory(paths, () => ({ ...getConfig(), memory: self()?.memory ?? getConfig().memory })),
   defaultOptions: () => ({ maxSteps: self()?.maxSteps ?? getConfig().limits.maxSteps, delegation: delegationContext(registry.resolved) }),
   inputProcessors: () =>
     ((m) => [orgScopeProcessor, ...(tokenBudget(m) ? [new TokenLimiterProcessor({ limit: tokenBudget(m) as number })] : []), ...(m.url ? [mergeSystemProcessor] : [])])(model()),

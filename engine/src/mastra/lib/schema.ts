@@ -29,6 +29,8 @@ export const BUILTIN_TOOLS = ["workspace", "schedule", "skills"] as const;
 /** A slug for a skill folder under ~/.eigen/skills: "pdf", or "@owner/slug" for ClawHub installs. Also the name an agent's `skills.inherit` lists. Never contains "..", a leading dot, or a backslash. */
 export const SkillSlug = z.string().max(100).regex(/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9]+(-[a-z0-9]+)*$/, "lowercase slug such as pdf-tools, or @owner/slug");
 export const TriggerId = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase slug: a-z, 0-9, '-', max 32 chars");
+/** owner/name of a GitHub repo. "." and ".." are valid characters but never a name: in the API path they would climb out of /repos/. */
+export const GITHUB_REPO = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 const CRON_FIELDS = /^\s*\S+(\s+\S+){4}\s*$/;
 
 /**
@@ -60,7 +62,7 @@ export const TriggerSchema = z.discriminatedUnion("type", [
   z.object({
     ...triggerCommon,
     type: z.literal("github-pr"),
-    repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "owner/name"),
+    repo: z.string().regex(GITHUB_REPO, "owner/name"),
     tokenEnv: z.string().regex(ENV_NAME, "upper-case env var name, e.g. GITHUB_TOKEN"),
     /** opened: a PR the poller has not seen. updated: a seen PR whose head commit changed. */
     events: z.array(z.enum(["opened", "updated"])).min(1).default(["opened"]),
@@ -153,7 +155,8 @@ export const AgentConfigSchema = z
     soul: z
       .object({
         source: z.enum(["shared", "own", "none"]).optional(),
-        file: z.string().regex(/\.md$/, "must be a .md file").default("soul.md"),
+        /** A plain file name in the agent folder (no sub-folders: the folder watcher only looks one level deep, and there is nothing to traverse). */
+        file: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/, "a file name ending in .md, in the agent folder").default("soul.md"),
       })
       .prefault({}),
     /** Which skills from ~/.eigen/skills this agent can load (needs the workspace tool). all = today's behaviour. The agent's own sandbox/skills always stay available. */
@@ -380,6 +383,8 @@ export type TriggerRun = {
   error?: string;
   /** Whether the reply reached Telegram. undefined = not asked to (or still running). */
   delivered?: boolean;
+  /** Why `delivered` is false, in a sentence ("the agent has no Telegram bot"). */
+  deliveryError?: string;
 };
 
 export type TriggerRuntime = { id: string; type: Trigger["type"]; state: TriggerState; nextRunAt?: string; lastRun?: TriggerRun; error?: string };
@@ -552,9 +557,12 @@ export type ListTriggerRunsResponse = { runs: TriggerRun[] };
  */
 export type RunTriggerResponse = { ok: boolean; run?: TriggerRun; error?: string };
 /** Engine POST /eigen/github/check, studio POST /api/github/check: can the token in that env var read that repo's pull requests? Never returns the token. */
-export const GithubCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME), repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) });
+export const GithubCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME), repo: z.string().regex(GITHUB_REPO) });
 export type GithubCheckRequest = z.infer<typeof GithubCheckRequest>;
 export type GithubCheckResponse = { ok: boolean; login?: string; openPulls?: number; error?: string };
+
+/** Engine GET /eigen/chat/:id/:session, studio GET /api/chat/:agentId?session=: the session's earlier messages (AI SDK UI messages), newest 100. `memory` says whose memory the chat shares. */
+export type ChatHistoryResponse = { messages: unknown[]; model: string; memory: { scope: "shared" | "isolated"; telegramUserId?: number } };
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Topology (React Flow). Positions are NOT here: they live in data/topology-layout.json.            */

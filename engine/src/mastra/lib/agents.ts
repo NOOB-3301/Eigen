@@ -31,6 +31,7 @@ import { makeMemory } from "./memory.ts";
 import {
   AGENT_CONFIG_FILE,
   AgentConfigSchema,
+  AgentId,
   agentEnvNames,
   agentProblems,
   buildTopology,
@@ -46,11 +47,14 @@ import {
   type ListAgentsResponse,
   type ResolvedAgent,
   type TelegramRuntime,
+  type TriggerRuntime,
 } from "./schema.ts";
+import { readOwnSoul, soulText } from "./soul.ts";
 import { instructionsPath } from "./store.ts";
 import { makeMcp, type Mcp } from "./tools/mcp.ts";
-import { makeWorkspace } from "./tools/workspace.ts";
+import { makeWorkspace, refreshSkills } from "./tools/workspace.ts";
 import { createBot, telegramChannels, type TelegramBot } from "./telegram.ts";
+import { createTriggerManager } from "./triggers.ts";
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Scan: pure read of the folder, no side effects                                                    */
@@ -91,8 +95,12 @@ export function scanAgentDir(dir: string, root: Config, env: NodeJS.ProcessEnv =
     if (!instructionsFile) problems.push("instructions.file must stay inside the agent folder");
     else if (!existsSync(instructionsFile)) problems.push(`instructions file ${config.instructions.file} is missing`);
   }
-  if (problems.length) return { id, dir, config, problems };
   const resolved = resolveAgent(config, root);
+  if (resolved.soul.source === "own") {
+    const own = readOwnSoul(dir, resolved.soul.file); // like a missing instructions file: the agent is invalid (or stale), not silently running without its soul
+    if ("problem" in own) problems.push(own.problem);
+  }
+  if (problems.length) return { id, dir, config, problems };
   const secrets = agentEnvNames(resolved, root).map((n) => `${n}=${valueFingerprint(env[n])}`);
   return { id, dir, config, resolved, instructionsFile, problems, hash: sha(JSON.stringify(resolved) + secrets.join(",")) };
 }
@@ -125,6 +133,8 @@ export type BuiltAgent = {
   mcpErrors?: Record<string, string>;
   /** This agent's own Telegram bot, if it has one. The registry stops it before a replacement is added (one poller per token). */
   telegram?: TelegramBot;
+  /** Re-reads the skill folders now (the registry calls it when ~/.eigen/skills changes). Absent when the agent has no workspace. */
+  refreshSkills?: () => Promise<void>;
 };
 export type AgentFactory = (r: ResolvedAgent, scanned: ScannedAgent, deps: FactoryDeps) => Promise<BuiltAgent>;
 export type FactoryDeps = {
@@ -136,6 +146,7 @@ export type FactoryDeps = {
   env: NodeJS.ProcessEnv;
   /** The bot token to start this agent's bot with. Undefined: no bot (not enabled, token not set, or another agent holds the same token). */
   telegramToken?: string;
+  log?: (msg: string, extra?: unknown) => void;
 };
 
 /**
@@ -172,7 +183,7 @@ export const toolsFromServers = <T,>(tools: Record<string, T>, servers: string[]
   return pickBy(tools, (_t, name) => servers.includes(owner(name) ?? ""));
 };
 
-export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents, resolved, telegramToken }) => {
+export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents, resolved, telegramToken, log }) => {
   const p = r.sandboxMode === "own" ? ownSandboxPaths(paths, scanned.dir) : paths;
   const cfgFor = (): Config => ({ ...root(), memory: r.memory, limits: { maxSteps: r.maxSteps } });
 
@@ -180,7 +191,7 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
   const ownMcp = Object.keys(r.mcp.own).length ? makeMcp() : undefined;
   const ownState = ownMcp ? await ownMcp.load({ ...cfgFor(), mcpServers: r.mcp.own }) : undefined;
 
-  const workspace = r.builtinTools.includes("workspace") ? makeWorkspace(p, cfgFor(), undefined, `agent-${r.id}`) : undefined;
+  const workspace = r.builtinTools.includes("workspace") ? makeWorkspace(p, cfgFor(), undefined, `agent-${r.id}`, { skills: r.skills.inherit, log }) : undefined;
 
   // The bot is only created here (no polling yet); Mastra starts polling when the agent is added to it.
   const bot = telegramToken ? createBot({ token: telegramToken, allowedUserIds: r.telegram.allowedUserIds }) : undefined;
@@ -188,7 +199,7 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
   if (bot) {
     const queue = makeChatQueue();
     const { slashHandler } = await import("./commands.ts"); // loaded lazily: it pulls in the consolidation and skills code
-    channels = telegramChannels(bot, { queue, verbose: () => false, slash: slashHandler({ paths, mcp: rootMcp, queue, agentId: r.id, baseModel: () => r.modelKey, restricted: true }) });
+    channels = telegramChannels(bot, { queue, verbose: () => false, isolatedAs: r.memory.scope === "isolated" ? r.id : undefined, slash: slashHandler({ paths, mcp: rootMcp, queue, agentId: r.id, baseModel: () => r.modelKey, restricted: true }) });
   }
 
   const agent = new Agent({
@@ -199,7 +210,7 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
     instructions: () =>
       compact([
         tag("role", r.instructions.inline ?? readText(scanned.instructionsFile!)),
-        r.instructions.includeSoul && tag("soul", readText(paths.soulFile)),
+        tag("soul", soulText(r.soul, paths, scanned.dir)),
         r.instructions.includeMemoryFiles && tag("memory", memoryBlock(paths.memoryDir)),
       ]).join("\n\n"),
     model: toMastraModel(r.model),
@@ -214,6 +225,7 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
   return {
     agent,
     telegram: bot,
+    refreshSkills: workspace && (() => refreshSkills(workspace)),
     dispose: async () => {
       await bot?.stop();
       await ownMcp?.close();
@@ -264,11 +276,41 @@ export function createAgentRegistry(opts: RegistryOptions) {
   const emit = (e: AgentEvent) => events.emit("event", e);
   const isFs = (id: string) => fsAgentIds.includes(id);
 
-  /** Runtime as the API reports it: the agent's load status plus its bot's state. */
+  /** Cron and GitHub triggers wake agents on their own. They start with an agent version (load) and stop when the agent goes (unload). */
+  const triggers = createTriggerManager({
+    paths,
+    env,
+    log: (msg) => log(msg),
+    emit: (id, trigger) => emit({ type: "agent.trigger", id, trigger }),
+    timezone: () => getConfig().timezone,
+    agentOf: (id) => {
+      try {
+        return running.get(id)?.built?.agent ?? (mastra && isFs(id) ? (mastra.getAgentById(id) as Agent) : undefined);
+      } catch {
+        return undefined; // the file router has not registered the primary yet
+      }
+    },
+    botOf: (id) => running.get(id)?.built?.telegram ?? tracked.get(id)?.bot,
+    secretsOf: (id) => {
+      const r = running.get(id)?.resolved;
+      return r ? agentEnvNames(r, getConfig()).flatMap((name) => env[name] ?? []) : [];
+    },
+  });
+
+  /** An agent that is switched off still lists its triggers, as disabled. */
+  const triggersOf = (id: string): TriggerRuntime[] | undefined => {
+    const live = triggers.runtimes(id);
+    if (live) return live.length ? live : undefined;
+    const c = scan.agents.get(id)?.config;
+    return c && !c.enabled && c.triggers.length ? c.triggers.map((t) => ({ id: t.id, type: t.type, state: "disabled" })) : undefined;
+  };
+
+  /** Runtime as the API reports it: the agent's load status plus its bot's and triggers' state. */
   const runtimeOf = (id: string): AgentRuntime | undefined => {
     const r = runtime.get(id);
     const t = tg.get(id);
-    return r && t ? { ...r, telegram: t } : r;
+    const tr = triggersOf(id);
+    return r && (t || tr) ? { ...r, ...(t && { telegram: t }), ...(tr && { triggers: tr }) } : r;
   };
 
   function setTelegram(id: string, t: TelegramRuntime) {
@@ -328,6 +370,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
     const cur = running.get(id);
     if (!cur) return;
     running.delete(id);
+    triggers.drop(id); // before the bot: a run that finishes now must not try to deliver through a bot that is stopping
     // First the bot (no more messages for an agent that is going away), then the agent, then everything else it held.
     await cur.built?.telegram?.stop().catch((e) => log(`stopping the bot of ${id} failed`, e));
     if (!isFs(id)) mastra?.removeAgent(id);
@@ -345,7 +388,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
       if (!mastra) return; // not attached yet; the attach() sync will load it
       const tokenName = resolved.telegram.enabled ? resolved.telegram.tokenEnv : undefined;
       const tokenValue = tokenName ? env[tokenName] : undefined;
-      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents, resolved: (id) => running.get(id)?.resolved, env, telegramToken: blockedBy ? undefined : tokenValue });
+      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents, resolved: (id) => running.get(id)?.resolved, env, telegramToken: blockedBy ? undefined : tokenValue, log });
       const prev = running.get(s.id);
       // Telegram allows one poller per token and Mastra starts polling as soon as the agent is added, so the old bot must be fully stopped first.
       await prev?.built?.telegram?.stop().catch((e) => log(`stopping the old bot of ${s.id} failed`, e));
@@ -365,6 +408,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
       built.telegram?.subscribe((next) => running.get(s.id)?.built === built && setTelegram(s.id, next));
       await prev?.built?.dispose?.().catch((e) => log(`dispose ${s.id} failed`, e));
     }
+    triggers.sync(s.id, resolved);
     runtime.set(s.id, { status: "loaded", problems: [], loadedHash: s.hash, loadedAt, mcpErrors: running.get(s.id)?.built?.mcpErrors });
     emit({ type: "agent.loaded", id: s.id, hash: s.hash! });
   }
@@ -447,6 +491,41 @@ export function createAgentRegistry(opts: RegistryOptions) {
     onChange(changed.some((n) => rootMcpEnv.has(n))); // a root MCP server that reads the variable must reconnect
   }
 
+  /** Does a change at `rel` (under ~/.eigen/skills, "/"-separated) reach this agent? Agents on "all" see every skill; the others only the ones they name. */
+  const seesSkill = ({ inherit }: ResolvedAgent["skills"], rel: string) => inherit === "all" || (Array.isArray(inherit) && inherit.some((name) => rel === name || rel.startsWith(`${name}/`)));
+
+  /** The skill library changed: the agents that see it re-read their skill folders now, instead of at Mastra's 30 s staleness check. */
+  async function refreshAgentSkills(changed: string[]) {
+    for (const [id, r] of running) {
+      if (!changed.some((rel) => seesSkill(r.resolved.skills, rel))) continue;
+      try {
+        if (r.built) await r.built.refreshSkills?.();
+        else {
+          // The primary has no BuiltAgent: its workspace is the one Mastra assembled from agents/eigen/workspace.ts.
+          const workspace = await (mastra?.getAgentById(id) as Agent | undefined)?.getWorkspace?.();
+          if (workspace) await refreshSkills(workspace);
+        }
+      } catch (e) {
+        log(`refreshing the skills of ${id} failed`, e);
+      }
+    }
+  }
+
+  /** Debounced like the agent folder; every path in the burst is kept so only the agents that see one of them refresh. */
+  const changedSkills = new Set<string>();
+  let skillsTimer: NodeJS.Timeout | undefined;
+  function onSkillsChange(rel: string) {
+    const parts = rel.split(sep);
+    if (parts.some((p) => p.startsWith(".")) || rel.endsWith(".tmp")) return; // the studio writes through a .tmp file and renames it
+    changedSkills.add(parts.join("/"));
+    clearTimeout(skillsTimer);
+    skillsTimer = setTimeout(() => {
+      const changed = [...changedSkills];
+      changedSkills.clear();
+      void refreshAgentSkills(changed);
+    }, debounceMs);
+  }
+
   return {
     events,
 
@@ -474,6 +553,19 @@ export function createAgentRegistry(opts: RegistryOptions) {
       return [...names];
     },
 
+    /** Env names that hold a GitHub token in some github-pr trigger: with GITHUB_*, the only names the GitHub check may read. */
+    githubEnvNames(): string[] {
+      const names = new Set<string>();
+      for (const s of scan.agents.values()) for (const t of s.config?.triggers ?? []) if (t.type === "github-pr") names.add(t.tokenEnv);
+      return [...names];
+    },
+
+    /** Run history of an agent's triggers, newest first. Undefined for an agent that does not exist. */
+    triggerRuns: (id: string, limit: number) => (scan.agents.has(id) && AgentId.safeParse(id).success ? triggers.runs(id, limit) : undefined),
+
+    /** Fires one trigger now and resolves when the run is over. Undefined for an agent or trigger that is not running. */
+    runTrigger: (id: string, triggerId: string) => triggers.runNow(id, triggerId),
+
     /** The primary's bot (built at boot by agents/eigen/config.ts): report its state like any other, and flag when a change needs a restart. */
     trackBot(id: string, bot: TelegramBot, boot: { tokenEnv: string; allowedUserIds: number[] }) {
       tracked.get(id)?.off();
@@ -497,12 +589,16 @@ export function createAgentRegistry(opts: RegistryOptions) {
           else if (name === basename(paths.envFile)) onEnvChange();
         }),
       );
+      // The studio's skill editor writes ~/.eigen/skills/<slug>/SKILL.md.
+      if (existsSync(paths.userSkillsDir)) watchers.push(watch(paths.userSkillsDir, { recursive: true }, (_e, f) => f && onSkillsChange(f.toString())));
     },
 
     async close() {
       clearTimeout(timer);
+      clearTimeout(skillsTimer);
       watchers.splice(0).forEach((w) => w.close());
       await queue;
+      await triggers.close();
       for (const id of [...running.keys()]) await unload(id);
       for (const t of tracked.values()) {
         t.off();

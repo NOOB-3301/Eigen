@@ -8,7 +8,7 @@ import { toMastraModel, type Config } from "./config.ts";
 import type { ModelTestResponse, TelegramCheckResponse } from "./schema.ts";
 import { redact } from "./secrets.ts";
 
-const scrub = (e: unknown, secrets: Array<string | undefined>) => {
+export const scrub = (e: unknown, secrets: Array<string | undefined>) => {
   let text = redact(String((e as Error)?.message ?? e));
   for (const s of secrets) if (s) text = text.split(s).join("[redacted]");
   return truncate(text, { length: 300 });
@@ -16,6 +16,9 @@ const scrub = (e: unknown, secrets: Array<string | undefined>) => {
 
 /** Which env variables the token check may read: anything named TELEGRAM_*, or a variable some config names as a bot token. Never an arbitrary secret. */
 export const telegramEnvAllowed = (name: string, known: string[]) => name.startsWith("TELEGRAM_") || known.includes(name);
+
+/** Which env variables the GitHub check may read: anything named GITHUB_*, or a variable some github-pr trigger names as its token. Never an arbitrary secret. */
+export const githubEnvAllowed = (name: string, known: string[]) => name.startsWith("GITHUB_") || known.includes(name);
 
 /** getMe with this token. `api` is the Bot API base (TELEGRAM_API_BASE_URL in tests). */
 export async function checkTelegramToken(token: string | undefined, api = "https://api.telegram.org", fetchFn: typeof fetch = fetch): Promise<TelegramCheckResponse> {

@@ -44,14 +44,17 @@ export const memoryBlock = (memoryDir: string) =>
     { length: MEMORY_MAX_CHARS, omission: "\n[memory truncated]" },
   );
 
-/** What the primary's .agents/<id>/config.json `instructions` settings resolve to. Omitted: prompts/system.md, with soul and memory. */
-export type PrimaryPrompt = { text?: string; soul?: boolean; memory?: boolean };
+/**
+ * What the primary's .agents/<id>/config.json settings resolve to. Omitted: prompts/system.md, the shared SOUL.md, and memory.
+ * `soul` is the persona text itself (lib/soul.ts reads it for the agent's soul source); "" leaves the block out.
+ */
+export type PrimaryPrompt = { text?: string; soul?: string; memory?: boolean };
 
 /** Re-read from disk on every turn, so edits apply to the next message. The clock goes last to keep the cacheable prefix stable. */
-export const buildInstructions = (p: HomePaths, zone: string, at?: Date, { text, soul = true, memory = true }: PrimaryPrompt = {}) =>
+export const buildInstructions = (p: HomePaths, zone: string, at?: Date, { text, soul = readText(p.soulFile), memory = true }: PrimaryPrompt = {}) =>
   compact([
     tag("operating_instructions", (text ?? readText(p.systemPromptFile)) || FALLBACK),
-    soul && tag("soul", readText(p.soulFile)),
+    tag("soul", soul),
     tag("ground_rules", `${GROUND_RULES_INTRO}\n\n${truncate(readText(p.groundRulesFile), { length: GROUND_RULES_MAX_CHARS, omission: "\n[rules truncated]" }) || "(none yet)"}`),
     memory && tag("memory", memoryBlock(p.memoryDir)),
     tag("skill_notes", readText(reportFile(p))),
