@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useMemo } from 'react';
-import ReactFlow, { Node, Edge, Controls, Background, useNodesState, useEdgesState, Position } from '@xyflow/react';
+import { ReactFlow, Node, Edge, Controls, Background, useNodesState, useEdgesState, Position } from '@xyflow/react';
 import { motion } from 'motion/react';
 import { useOrchestrator } from '@/context/orchestrator';
 import { AgentNode } from './nodes/agent-node';
@@ -46,17 +46,19 @@ export function AgentCanvas() {
 
   return (
     <motion.div className="flex-1 relative overflow-hidden" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
-        fitView
-      >
-        <Background color="#1e293b" gap={16} />
-        <Controls />
-      </ReactFlow>
+      <div className="w-full h-full">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          nodeTypes={nodeTypes}
+          fitView
+        >
+          <Background color="#1e293b" gap={16} />
+          <Controls />
+        </ReactFlow>
+      </div>
     </motion.div>
   );
 }
