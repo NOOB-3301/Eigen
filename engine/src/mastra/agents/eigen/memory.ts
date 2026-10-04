@@ -1,5 +1,6 @@
 import { getConfig } from "../../lib/config.ts";
-import { readyPaths } from "../../lib/home.ts";
+import { paths, PRIMARY_ID, registry } from "../../lib/fleet.ts";
 import { makeMemory } from "../../lib/memory.ts";
 
-export default makeMemory(readyPaths(), getConfig);
+/** Root memory settings with the primary's own overrides (lastMessages, semanticRecall, observational) on top. */
+export default makeMemory(paths, () => ({ ...getConfig(), memory: registry.resolved(PRIMARY_ID)?.memory ?? getConfig().memory }));

@@ -41,8 +41,8 @@ export const AgentConfigSchema = z
     model: z.string().min(1).optional(),
     instructions: z
       .object({
-        /** Relative to the agent folder. Missing file + no inline = config error. */
-        file: z.string().default("instructions.md"),
+        /** Relative to the agent folder. Missing file + no inline = config error. Markdown only, so it can never point the editor at .env or a config. */
+        file: z.string().regex(/\.md$/, "must be a .md file").default("instructions.md"),
         /** Used instead of `file` when set; handy for one-liners created from the UI. */
         inline: z.string().optional(),
         /** Prepend ~/.eigen/SOUL.md (shared persona). */
@@ -259,6 +259,9 @@ export type GetAgentResponse = {
   etag: string;
 };
 
+/** Engine GET /eigen/agents/:id: what is running (the web app reads the files itself). `resolved` is the last good version for a stale agent. */
+export type GetAgentRuntimeResponse = { id: string; runtime: AgentRuntime; resolved: ResolvedAgent | null };
+
 /** POST /api/agents/:id/config. `etag` from the GET; omit to force. `instructionsText` writes the instructions file too. */
 export const UpdateAgentConfigRequest = z.object({
   config: z.unknown(),
@@ -333,13 +336,17 @@ export function buildTopology(summaries: AgentSummary[], resolved: ResolvedAgent
   return { nodes, edges };
 }
 
-/** What `npm run setup` / the migration writes for the existing single agent. */
+/**
+ * What `npm run setup` / the migration writes for the existing single agent.
+ * Its instructions stay in ~/.eigen/prompts/system.md (one source of truth, so editing the primary's prompt in the studio edits the file it always used).
+ */
 export const DEFAULT_PRIMARY: AgentConfigInput = {
   id: "eigen",
   name: "Eigen",
   role: "assistant",
   description: "The user's personal assistant. Talks to the user on Telegram and delegates specialised work to other agents.",
   primary: true,
+  instructions: { file: "../../prompts/system.md" },
   tools: { builtin: ["workspace", "schedule", "skills"], mcp: { inherit: "all" } },
   memory: { scope: "shared" },
   delegation: { acceptsFrom: "none" },

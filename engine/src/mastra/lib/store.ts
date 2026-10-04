@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Config } from "./config.ts";
 import type { HomePaths } from "./home.ts";
 import {
@@ -33,6 +33,14 @@ export function agentDir(p: HomePaths, id: string) {
   return join(p.agentsDir, ok.data);
 }
 
+/** Instruction files live in the agent's own folder. The one exception is the primary's shared prompt, ~/.eigen/prompts/system.md. Anything else (`../../memory/x.md`, absolute paths) is refused, so the studio cannot be pointed at other files. */
+export function instructionsPath(dir: string, file: string): string | undefined {
+  const full = resolve(dir, file);
+  const rel = relative(dir, full);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return full;
+  return full === join(dir, "..", "..", "prompts", "system.md") ? full : undefined;
+}
+
 function writeAtomic(file: string, text: string) {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -58,15 +66,17 @@ export function readAgent(p: HomePaths, id: string): (RawAgent & { parseError?: 
     parseError = (e as Error).message;
   }
   const file = (config as { instructions?: { file?: string } }).instructions?.file ?? "instructions.md";
-  return { id, config, instructionsText: readOrNull(join(dir, file)), etag: etagOf(text), ...(parseError && { parseError }) };
+  const path = instructionsPath(dir, file);
+  return { id, config, instructionsText: path ? readOrNull(path) : null, etag: etagOf(text), ...(parseError && { parseError }) };
 }
 
 /** Everything that must hold before a file is written. Fleet-wide rules (one primary, alias clashes) are reported by the engine, not enforced here, so a swap of primaries can be done in two saves. */
-export function validateAgent(id: string, config: unknown, root: Config): { issues: string[]; parsed?: AgentConfig } {
+export function validateAgent(p: HomePaths, id: string, config: unknown, root: Config): { issues: string[]; parsed?: AgentConfig } {
   const r = AgentConfigSchema.safeParse(config);
   if (!r.success) return { issues: r.error.issues.map((i) => `${i.path.join(".") || "config"}: ${i.message}`) };
   const issues = agentProblems(r.data, root);
   if (r.data.id !== id) issues.push(`id "${r.data.id}" must equal the folder name "${id}"`);
+  if (!r.data.instructions.inline && !instructionsPath(agentDir(p, id), r.data.instructions.file)) issues.push("instructions.file: must stay inside the agent folder");
   return { issues, parsed: r.data };
 }
 
@@ -77,11 +87,11 @@ export function writeAgent(p: HomePaths, root: Config, id: string, req: UpdateAg
   if (current === null) return { status: 404, body: { ok: false, issues: [`no agent "${id}"`] } };
   if (req.etag && req.etag !== etagOf(current)) return { status: 409, body: { ok: false, etag: etagOf(current), issues: ["the file changed since you opened it"] } };
 
-  const { issues, parsed } = validateAgent(id, req.config, root);
+  const { issues, parsed } = validateAgent(p, id, req.config, root);
   if (issues.length || !parsed) return { status: 400, body: { ok: false, issues } };
 
   const next = `${JSON.stringify(req.config, null, 2)}\n`;
-  if (req.instructionsText !== undefined && !parsed.instructions.inline) writeAtomic(join(dir, parsed.instructions.file), req.instructionsText);
+  if (req.instructionsText !== undefined && !parsed.instructions.inline) writeAtomic(instructionsPath(dir, parsed.instructions.file)!, req.instructionsText);
   writeAtomic(join(dir, AGENT_CONFIG_FILE), next);
   return { status: 200, body: { ok: true, etag: etagOf(next) } };
 }
@@ -92,9 +102,9 @@ export function createAgent(p: HomePaths, root: Config, config: AgentConfigInput
   if (!AgentId.safeParse(id).success) return { status: 400, body: { ok: false, issues: [`id: must be a lowercase slug (a-z, 0-9, "-", max 32)`] } };
   const dir = agentDir(p, id);
   if (existsSync(dir)) return { status: 409, body: { ok: false, issues: [`agent "${id}" already exists`] } };
-  const { issues, parsed } = validateAgent(id, config, root);
+  const { issues, parsed } = validateAgent(p, id, config, root);
   if (issues.length || !parsed) return { status: 400, body: { ok: false, issues } };
-  if (!parsed.instructions.inline) writeAtomic(join(dir, parsed.instructions.file), instructionsText || `You are ${parsed.name}. ${parsed.description}\n`);
+  if (!parsed.instructions.inline) writeAtomic(instructionsPath(dir, parsed.instructions.file)!, instructionsText || `You are ${parsed.name}. ${parsed.description}\n`);
   const text = `${JSON.stringify(config, null, 2)}\n`;
   writeAtomic(join(dir, AGENT_CONFIG_FILE), text);
   return { status: 200, body: { ok: true, etag: etagOf(text) } };

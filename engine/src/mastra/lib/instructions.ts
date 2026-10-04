@@ -44,13 +44,16 @@ export const memoryBlock = (memoryDir: string) =>
     { length: MEMORY_MAX_CHARS, omission: "\n[memory truncated]" },
   );
 
+/** What the primary's .agents/<id>/config.json `instructions` settings resolve to. Omitted: prompts/system.md, with soul and memory. */
+export type PrimaryPrompt = { text?: string; soul?: boolean; memory?: boolean };
+
 /** Re-read from disk on every turn, so edits apply to the next message. The clock goes last to keep the cacheable prefix stable. */
-export const buildInstructions = (p: HomePaths, zone: string, at?: Date) =>
+export const buildInstructions = (p: HomePaths, zone: string, at?: Date, { text, soul = true, memory = true }: PrimaryPrompt = {}) =>
   compact([
-    tag("operating_instructions", readText(p.systemPromptFile) || FALLBACK),
-    tag("soul", readText(p.soulFile)),
+    tag("operating_instructions", (text ?? readText(p.systemPromptFile)) || FALLBACK),
+    soul && tag("soul", readText(p.soulFile)),
     tag("ground_rules", `${GROUND_RULES_INTRO}\n\n${truncate(readText(p.groundRulesFile), { length: GROUND_RULES_MAX_CHARS, omission: "\n[rules truncated]" }) || "(none yet)"}`),
-    tag("memory", memoryBlock(p.memoryDir)),
+    memory && tag("memory", memoryBlock(p.memoryDir)),
     tag("skill_notes", readText(reportFile(p))),
     tag("secrets", SECRETS_RULE),
     tag("memory_rules", MEMORY_RULE),

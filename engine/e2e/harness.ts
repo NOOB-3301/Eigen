@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { homePaths, seedHome } from "../src/mastra/lib/home.ts";
+import { homePaths, seedHome, type HomePaths } from "../src/mastra/lib/home.ts";
 import { fakeLlm, type Turn } from "../test/helpers/fake-llm.ts";
 import { fakeTelegram } from "../test/helpers/fake-telegram.ts";
 
@@ -19,7 +19,7 @@ export async function waitFor(check: () => boolean, ms = 30_000) {
 }
 
 /** The built server (.mastra/output) wired to a fake Telegram and a scripted fake model. */
-export async function startEigen(turns: Turn[], config: Record<string, unknown> = {}, { port = 4199, service = false } = {}) {
+export async function startEigen(turns: Turn[], config: Record<string, unknown> = {}, { port = 4199, service = false, prepare }: { port?: number; service?: boolean; prepare?: (p: HomePaths) => void } = {}) {
   const tg = await fakeTelegram();
   const llm = await fakeLlm(turns);
   const p = homePaths(mkdtempSync(join(tmpdir(), "eigen-e2e-")));
@@ -30,6 +30,7 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   cfg.memory.embedder.url = llm.url;
   cfg.curatorModel = "local";
   writeFileSync(p.configFile, JSON.stringify(cfg));
+  prepare?.(p);
 
   const env = { ...process.env, EIGEN_HOME: p.home, EIGEN_PORT: String(port), TELEGRAM_API_BASE_URL: tg.url };
   // service: start the way the launchd plist does, with the token only in ~/.eigen/.env
@@ -50,6 +51,7 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
     tg,
     llm,
     api: (path: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}/api${path}`, init).then((r) => r.json()) as Promise<any>,
+    url: `http://127.0.0.1:${port}`,
     log: () => log,
     stop: async () => {
       proc.kill("SIGKILL");

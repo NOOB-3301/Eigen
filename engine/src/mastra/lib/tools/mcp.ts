@@ -30,7 +30,7 @@ export function makeMcp(env: NodeJS.ProcessEnv = process.env) {
     await old?.disconnect().catch(() => undefined);
   };
 
-  const load = async (cfg: Config): Promise<McpState> => {
+  const reload = async (cfg: Config): Promise<McpState> => {
     await close();
     const servers = omitBy(cfg.mcpServers, (s) => !s.enabled);
     if (!cfg.mcp.enabled || isEmpty(servers)) return (state = EMPTY);
@@ -38,6 +38,14 @@ export function makeMcp(env: NodeJS.ProcessEnv = process.env) {
     client = next;
     const { tools, errors } = await next.listToolsWithErrors({ perServerTimeoutMs: cfg.mcp.startupTimeoutMs }).catch((e) => ({ tools: {} as Tools, errors: { mcp: String(e) } }));
     return (state = { tools, errors, servers: Object.keys(servers) });
+  };
+
+  /** Serialized: the config watcher and /reload_mcp can overlap, and a reload must never close a client another is still listing. */
+  let pending: Promise<unknown> = Promise.resolve();
+  const load = (cfg: Config): Promise<McpState> => {
+    const run = pending.then(() => reload(cfg), () => reload(cfg));
+    pending = run.catch(() => undefined);
+    return run;
   };
 
   return { load, close, state: () => state, tools: () => state.tools };

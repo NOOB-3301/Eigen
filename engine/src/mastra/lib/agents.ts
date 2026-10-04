@@ -18,9 +18,9 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { Agent } from "@mastra/core/agent";
+import { Agent, type MastraDBMessage } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
-import { compact, pick } from "lodash-es";
+import { compact, maxBy, pick, pickBy } from "lodash-es";
 import { z } from "zod";
 import { getConfig, reloadConfig, toMastraModel, type Config } from "./config.ts";
 import type { HomePaths } from "./home.ts";
@@ -38,9 +38,11 @@ import {
   type AgentEvent,
   type AgentRuntime,
   type AgentSummary,
+  type GetAgentRuntimeResponse,
   type ListAgentsResponse,
   type ResolvedAgent,
 } from "./schema.ts";
+import { instructionsPath } from "./store.ts";
 import { makeMcp, type Mcp } from "./tools/mcp.ts";
 import { makeWorkspace } from "./tools/workspace.ts";
 
@@ -78,8 +80,11 @@ export function scanAgentDir(dir: string, root: Config): ScannedAgent {
   const config = parsed.data;
   const problems = agentProblems(config, root);
   if (config.id !== id) problems.push(`id "${config.id}" must equal the folder name "${id}"`);
-  const instructionsFile = join(dir, config.instructions.file);
-  if (!config.instructions.inline && !existsSync(instructionsFile)) problems.push(`instructions file ${config.instructions.file} is missing`);
+  const instructionsFile = instructionsPath(dir, config.instructions.file);
+  if (!config.instructions.inline) {
+    if (!instructionsFile) problems.push("instructions.file must stay inside the agent folder");
+    else if (!existsSync(instructionsFile)) problems.push(`instructions file ${config.instructions.file} is missing`);
+  }
   if (problems.length) return { id, dir, config, problems };
   const resolved = resolveAgent(config, root);
   return { id, dir, config, resolved, instructionsFile, problems, hash: sha(JSON.stringify(resolved)) };
@@ -108,7 +113,23 @@ export function scanAgents(agentsDir: string, root: Config): Scan {
 
 export type BuiltAgent = { agent: Agent; dispose?: () => Promise<void>; mcpErrors?: Record<string, string> };
 export type AgentFactory = (r: ResolvedAgent, scanned: ScannedAgent, deps: FactoryDeps) => Promise<BuiltAgent>;
-export type FactoryDeps = { paths: HomePaths; root: () => Config; rootMcp: Mcp; subAgents: (id: string) => Record<string, Agent> };
+export type FactoryDeps = {
+  paths: HomePaths;
+  root: () => Config;
+  rootMcp: Mcp;
+  subAgents: (id: string) => Record<string, Agent>;
+  resolved: (id: string) => ResolvedAgent | undefined;
+};
+
+/**
+ * What a sub-agent sees of its caller's conversation. Mastra hands it the caller's messages INCLUDING the caller's system
+ * prompt (with the user's memory files); that never goes along. An isolated agent gets only the delegation prompt; a shared
+ * one also gets the user/assistant turns.
+ */
+export const delegationContext = (resolved: (id: string) => ResolvedAgent | undefined) => ({
+  messageFilter: ({ messages, primitiveId }: { messages: MastraDBMessage[]; primitiveId: string }) =>
+    resolved(primitiveId)?.memory.scope === "shared" ? messages.filter((m) => m.role === "user" || m.role === "assistant") : [],
+});
 
 const tag = (name: string, body: string) => (body ? `<${name}>\n${body}\n</${name}>` : "");
 
@@ -125,11 +146,16 @@ const ownSandboxPaths = (p: HomePaths, dir: string): HomePaths => {
   };
 };
 
-/** MCPClient namespaces tools as `<server>_<tool>`; inherited servers reuse the root client instead of spawning a second process. */
-const toolsFromServers = <T,>(tools: Record<string, T>, servers: string[]): Record<string, T> =>
-  Object.fromEntries(Object.entries(tools).filter(([name]) => servers.some((s) => name.startsWith(`${s}_`))));
+/**
+ * MCPClient namespaces tools as `<server>_<tool>`; inherited servers reuse the root client instead of spawning a second process.
+ * A tool belongs to the LONGEST server name that prefixes it, so inheriting "git" never leaks the tools of a server named "git_hub".
+ */
+export const toolsFromServers = <T,>(tools: Record<string, T>, servers: string[], allServers: string[]): Record<string, T> => {
+  const owner = (name: string) => maxBy(allServers.filter((s) => name.startsWith(`${s}_`)), (s) => s.length);
+  return pickBy(tools, (_t, name) => servers.includes(owner(name) ?? ""));
+};
 
-export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents }) => {
+export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents, resolved }) => {
   const p = r.sandboxMode === "own" ? ownSandboxPaths(paths, scanned.dir) : paths;
   const cfgFor = (): Config => ({ ...root(), memory: r.memory, limits: { maxSteps: r.maxSteps } });
 
@@ -151,10 +177,10 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
         r.instructions.includeMemoryFiles && tag("memory", memoryBlock(paths.memoryDir)),
       ]).join("\n\n"),
     model: toMastraModel(r.model),
-    defaultOptions: { maxSteps: r.maxSteps },
+    defaultOptions: { maxSteps: r.maxSteps, delegation: delegationContext(resolved) },
     memory: makeMemory(paths, cfgFor),
     workspace,
-    tools: () => ({ ...toolsFromServers(rootMcp.tools(), r.mcp.inherited), ...(ownMcp?.tools() ?? {}) }),
+    tools: () => ({ ...toolsFromServers(rootMcp.tools(), r.mcp.inherited, rootMcp.state().servers), ...(ownMcp?.tools() ?? {}) }),
     agents: () => subAgents(r.id),
   });
 
@@ -189,6 +215,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
   let scan: Scan = { agents: new Map(), fleet: [] };
   let rootProblem: string | undefined;
   let mastra: Mastra | undefined;
+  let attached: Promise<void> | undefined;
   let queue: Promise<void> = Promise.resolve();
   let rev = 0;
   const watchers: FSWatcher[] = [];
@@ -224,7 +251,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
       running.set(s.id, { hash: s.hash!, resolved, loadedAt });
     } else {
       if (!mastra) return; // not attached yet; the attach() sync will load it
-      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents });
+      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents, resolved: (id) => running.get(id)?.resolved });
       const prev = running.get(s.id);
       // Mastra's addAgent throws on an existing key, so swap: remove old, add new, then dispose old resources.
       mastra.removeAgent(s.id);
@@ -302,16 +329,19 @@ export function createAgentRegistry(opts: RegistryOptions) {
     events,
 
     /** Idempotent. Call as early as a Mastra instance is reachable; the first call loads every agent. */
-    attach(m: Mastra) {
-      if (mastra === m) return queue;
+    attach(m: Mastra): Promise<void> {
+      if (mastra === m && attached) return attached;
       mastra = m;
-      return sync();
+      return (attached = sync());
     },
 
     /** Initial scan without Mastra (so the fs primary can read its resolved settings at module load). */
     start() {
       return sync();
     },
+
+    /** Re-scan now (tests, or after an out-of-band change). `reloadRoot` also re-reads config.json and reconnects root MCP. */
+    reload: (reloadRoot = false) => sync(reloadRoot),
 
     watch() {
       if (watchers.length) return;
@@ -335,6 +365,14 @@ export function createAgentRegistry(opts: RegistryOptions) {
     /** Telegram routing: "@alias" / "/use alias" -> agent id, only for loaded agents. */
     byAlias(alias: string) {
       return [...running.values()].find((r) => r.resolved.aliases.includes(alias.toLowerCase()))?.resolved.id;
+    },
+
+    /** Body for GET /eigen/agents/:id. */
+    detail(id: string): GetAgentRuntimeResponse | undefined {
+      const s = scan.agents.get(id);
+      const r = running.get(id)?.resolved;
+      if (!s && !r) return undefined;
+      return { id, runtime: runtime.get(id) ?? { status: "invalid", problems: s?.problems ?? [] }, resolved: r ?? s?.resolved ?? null };
     },
 
     summaries(): AgentSummary[] {

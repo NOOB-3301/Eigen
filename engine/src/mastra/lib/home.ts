@@ -1,6 +1,7 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { AGENT_CONFIG_FILE, DEFAULT_PRIMARY } from "./schema.ts";
 
 export type HomePaths = ReturnType<typeof homePaths>;
 
@@ -57,6 +58,19 @@ const SEEDS: Array<[dest: string, src: string]> = [
   ...["MEMORY", "profile", "projects", "people", "lessons"].map((n): [string, string] => [`memory/${n}.md`, `memory/${n}.md`]),
 ];
 
+/**
+ * Writes the primary's .agents/eigen/config.json when .agents/ holds no agent folder at all (fresh install, or a home from
+ * before multi-agent). Never touches an existing folder, and leaves data/, memory/, sandbox/ and skills/ where they are.
+ */
+export function seedAgents(p: HomePaths) {
+  const any = existsSync(p.agentsDir) && readdirSync(p.agentsDir, { withFileTypes: true }).some((e) => e.isDirectory() && !/^[._]/.test(e.name));
+  if (any) return [];
+  const rel = join(".agents", String(DEFAULT_PRIMARY.id), AGENT_CONFIG_FILE);
+  mkdirSync(dirname(join(p.home, rel)), { recursive: true });
+  writeFileSync(join(p.home, rel), `${JSON.stringify(DEFAULT_PRIMARY, null, 2)}\n`, { flag: "wx" });
+  return [rel];
+}
+
 /** Copies missing defaults into the home dir; never overwrites. */
 export function seedHome(p: HomePaths, defaultsDir: string) {
   ensureDirs(p);
@@ -69,5 +83,5 @@ export function seedHome(p: HomePaths, defaultsDir: string) {
     if (dest === ".env") chmodSync(to, 0o600);
     created.push(dest);
   }
-  return created;
+  return [...created, ...seedAgents(p)];
 }

@@ -22,5 +22,6 @@ export function patchState(p: HomePaths, patch: State) {
   return next;
 }
 
-/** The chosen model, unless config.json no longer has it. */
-export const activeModel = (cfg: Config, state: State) => (state.model && state.model in cfg.models ? state.model : cfg.defaultModel);
+/** The model chosen with /model, unless config.json no longer has it; otherwise `base` (the primary's own `model`), then the root default. */
+export const activeModel = (cfg: Config, state: State, base?: string) =>
+  state.model && state.model in cfg.models ? state.model : base && base in cfg.models ? base : cfg.defaultModel;

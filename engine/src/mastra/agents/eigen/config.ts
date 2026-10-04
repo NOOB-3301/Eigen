@@ -2,26 +2,27 @@ import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { agentConfig } from "@mastra/core/agent";
 import { TokenLimiterProcessor } from "@mastra/core/processors";
 import { truncate } from "lodash-es";
+import { delegationContext, toolsFromServers } from "../../lib/agents.ts";
 import { boot } from "../../lib/boot.ts";
 import { restoreActionId, shortenApprovalButtons } from "../../lib/callback-ids.ts";
 import { makeChatQueue } from "../../lib/chat-queue.ts";
 import { slashHandler } from "../../lib/commands.ts";
 import { getConfig, toMastraModel, tokenBudget } from "../../lib/config.ts";
-import { readyPaths } from "../../lib/home.ts";
+import { mcp, paths, PRIMARY_ID, registry } from "../../lib/fleet.ts";
 import { mergeSystemProcessor } from "../../lib/merge-system.ts";
 import { orgScopeProcessor } from "../../lib/org-scope.ts";
-import { makeMcp } from "../../lib/tools/mcp.ts";
 import { makeScheduleTool } from "../../lib/tools/schedule.ts";
 import { activeModel, readState } from "../../lib/state.ts";
 
 const config = await boot();
-const paths = readyPaths();
-const mcp = makeMcp();
 await mcp.load(config);
 const scheduleTool = makeScheduleTool();
 const queue = makeChatQueue();
 
-const model = () => ((cfg) => cfg.models[activeModel(cfg, readState(paths))]!)(getConfig());
+/** The primary's settings from .agents/eigen/config.json; until that loads (or if it never does), the root config alone. */
+const self = () => registry.resolved(PRIMARY_ID);
+const baseModel = () => self()?.modelKey;
+const model = () => ((cfg) => cfg.models[activeModel(cfg, readState(paths), baseModel())]!)(getConfig());
 
 const telegram = shortenApprovalButtons(createTelegramAdapter({
   botToken: process.env[config.telegram.tokenEnv],
@@ -33,10 +34,18 @@ const telegram = shortenApprovalButtons(createTelegramAdapter({
 
 export default agentConfig({
   model: () => toMastraModel(model()),
-  defaultOptions: { maxSteps: config.limits.maxSteps },
+  defaultOptions: () => ({ maxSteps: self()?.maxSteps ?? getConfig().limits.maxSteps, delegation: delegationContext(registry.resolved) }),
   inputProcessors: () =>
     ((m) => [orgScopeProcessor, ...(tokenBudget(m) ? [new TokenLimiterProcessor({ limit: tokenBudget(m) as number })] : []), ...(m.url ? [mergeSystemProcessor] : [])])(model()),
-  tools: () => ({ ...mcp.tools(), schedule: scheduleTool }),
+  tools: () => {
+    const r = self();
+    return { ...(r ? toolsFromServers(mcp.tools(), r.mcp.inherited, mcp.state().servers) : mcp.tools()), ...((r?.builtinTools.includes("schedule") ?? true) && { schedule: scheduleTool }) };
+  },
+  // Specialists that accept work from the primary. Attaching here is the fallback for when server.ts did not run first.
+  agents: async ({ mastra }) => {
+    if (mastra) await registry.attach(mastra);
+    return registry.subAgents(PRIMARY_ID);
+  },
   channels: {
     adapters: {
       telegram: {
@@ -56,7 +65,7 @@ export default agentConfig({
       },
       onMention: false,
       onSubscribedMessage: false,
-      onSlashCommand: slashHandler({ paths, mcp, queue, agentId: "eigen" }),
+      onSlashCommand: slashHandler({ paths, mcp, queue, agentId: PRIMARY_ID, baseModel, rescan: () => registry.reload() }),
     },
   },
 });

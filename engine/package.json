@@ -9,6 +9,7 @@
   },
   "scripts": {
     "setup": "node scripts/setup.ts",
+    "migrate": "node scripts/migrate.ts",
     "dev": "mastra dev --env ${EIGEN_HOME:-$HOME/.eigen}/.env",
     "build": "mastra build --studio",
     "serve": "mastra start --env ${EIGEN_HOME:-$HOME/.eigen}/.env",

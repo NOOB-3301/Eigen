@@ -14,7 +14,8 @@ import { reconcileSkills } from "./skills.ts";
 import { activeModel, patchState, readState } from "./state.ts";
 import { dayjs } from "./time.ts";
 
-export type Deps = { paths: HomePaths; mcp: Mcp; queue: ChatQueue; agentId: string };
+/** `baseModel`: the agent's own model key, used when no /model choice is set. `rescan`: re-resolve the agent fleet after config.json was re-read. */
+export type Deps = { paths: HomePaths; mcp: Mcp; queue: ChatQueue; agentId: string; baseModel?: () => string | undefined; rescan?: () => Promise<void> };
 type Ctx = Deps & { mastra: Mastra; args: string; chatId: string };
 type Command = { help: string; run: (c: Ctx) => Promise<string> | string };
 
@@ -43,7 +44,7 @@ const COMMANDS: Record<string, Command> = {
     run: async (c) => {
       const { paths, mastra, agentId } = c;
       const cfg = getConfig();
-      const name = activeModel(cfg, readState(paths));
+      const name = activeModel(cfg, readState(paths), c.baseModel?.());
       const last = lastRunAt(paths);
       const workspace = await mastra.getAgent(agentId).getWorkspace();
       const skills = await workspace?.skills?.list();
@@ -73,9 +74,9 @@ const COMMANDS: Record<string, Command> = {
   },
   model: {
     help: "/model to list, /model <name> to switch",
-    run: ({ paths, args }) => {
+    run: ({ paths, args, baseModel }) => {
       const cfg = getConfig();
-      const current = activeModel(cfg, readState(paths));
+      const current = activeModel(cfg, readState(paths), baseModel?.());
       const choice = args.trim();
       if (!choice) return lines("Models:", ...map(toPairs(cfg.models), ([k, m]) => `${k === current ? "•" : "-"} ${k} (${m.id})`));
       if (!(choice in cfg.models)) return `No model called "${choice}". Try /model.`;
@@ -85,8 +86,9 @@ const COMMANDS: Record<string, Command> = {
   },
   reload: {
     help: "re-read models, timezone and skills",
-    run: async ({ paths, mastra, agentId }) => {
+    run: async ({ paths, mastra, agentId, rescan }) => {
       reloadConfig();
+      await rescan?.();
       const { fixed, quarantined } = reconcileSkills(paths);
       const workspace = await mastra.getAgent(agentId).getWorkspace();
       await workspace?.skills?.refresh();
@@ -101,7 +103,11 @@ const COMMANDS: Record<string, Command> = {
   },
   reload_mcp: {
     help: "reconnect MCP servers",
-    run: async ({ mcp }) => mcpLine(await mcp.load(reloadConfig())),
+    run: async ({ mcp, rescan }) => {
+      const state = await mcp.load(reloadConfig());
+      await rescan?.();
+      return mcpLine(state);
+    },
   },
   verbose: {
     help: "/verbose on|off: show tool calls",
