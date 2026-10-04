@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homePaths, seedHome, type HomePaths } from "../src/mastra/lib/home.ts";
 import { fakeLlm, type Turn } from "../test/helpers/fake-llm.ts";
 import { fakeTelegram } from "../test/helpers/fake-telegram.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
+/** The mastra CLI, wherever npm put it (hoisted to the workspace root or local to engine/): same lookup as scripts/service.ts. */
+const pkg = createRequire(import.meta.url).resolve("mastra/package.json");
+const MASTRA_CLI = join(dirname(pkg), JSON.parse(readFileSync(pkg, "utf8")).bin.mastra);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function waitFor(check: () => boolean, ms = 30_000) {
@@ -36,7 +40,7 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   // service: start the way the launchd plist does, with the token only in ~/.eigen/.env
   if (service) writeFileSync(p.envFile, "TELEGRAM_BOT_TOKEN=123:abc\n");
   const proc = service
-    ? spawn(process.execPath, [join(ROOT, "node_modules/mastra/dist/index.js"), "start", "--env", p.envFile], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] })
+    ? spawn(process.execPath, [MASTRA_CLI, "start", "--env", p.envFile], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] })
     : spawn("node", [join(ROOT, ".mastra/output/index.mjs")], { env: { ...env, TELEGRAM_BOT_TOKEN: "123:abc" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stdout.on("data", (d) => (log += d));

@@ -86,7 +86,7 @@ describe("agent fleet (built server)", () => {
   it("a specialist's untrusted MCP call still asks for approval in Telegram", async () => {
     eigen = await startEigen([call("agent-researcher", { prompt: "echo ping" }), call("demo_echo", { text: "ping" }), { text: "researcher done" }, { text: "all done" }], {
       mcpServers: { demo: { command: process.execPath, args: [MCP_SERVER] } },
-    }, { port: 4192, prepare: (p) => addAgent(p, "researcher", { tools: { mcp: { inherit: ["demo"] } } }) });
+    }, { port: 4198, prepare: (p) => addAgent(p, "researcher", { tools: { mcp: { inherit: ["demo"] } } }) });
 
     eigen.tg.say("use the researcher");
     await waitFor(() => eigen!.tg.calls.some((c) => c.body.reply_markup?.inline_keyboard?.length), 20_000);

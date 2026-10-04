@@ -222,7 +222,9 @@ export function fleetProblems(agents: AgentConfig[], root: Pick<Config, "telegra
   if (primaries.length !== 1) add("*", `exactly one enabled agent must be primary (found ${primaries.length}: ${primaries.map((a) => a.id).join(", ") || "none"})`);
   const ids = new Set(enabled.map((a) => a.id));
   const tokenOwner = new Map<string, string>();
-  for (const a of enabled) {
+  // The primary is checked first (then by id) so a specialist that reuses the root bot's token is the one flagged, never the primary.
+  const ordered = [...enabled].sort((a, b) => Number(b.primary) - Number(a.primary) || a.id.localeCompare(b.id));
+  for (const a of ordered) {
     a.delegation.canDelegateTo.filter((t) => !ids.has(t)).forEach((t) => add(a.id, `delegation.canDelegateTo: "${t}" is not an enabled agent`));
     const t = resolveAgentTelegram(a, root);
     if (!t.enabled || !t.tokenEnv) continue;
@@ -337,6 +339,22 @@ export const SetSecretRequest = z.object({ value: z.string().min(1).max(4096) })
 export type SetSecretRequest = z.infer<typeof SetSecretRequest>;
 
 const envRefs = (values?: Record<string, string>) => Object.values(values ?? {}).flatMap((v) => (v.startsWith("env:") ? [v.slice(4)] : []));
+
+/**
+ * The env variable NAMES one agent's behaviour depends on: its model key, its bot token, the embedder key, the keys of the
+ * models its memory uses, and any `env:NAME` in its private MCP servers. The registry hashes the VALUES of these names into the
+ * agent's version, so a key rotated in `.env` rebuilds exactly the agents that use it.
+ */
+export function agentEnvNames(r: ResolvedAgent, root: Pick<Config, "models">): string[] {
+  const names = new Set<string>();
+  const add = (n: string | undefined) => n && names.add(n);
+  add(r.model.apiKeyEnv);
+  if (r.telegram.enabled) add(r.telegram.tokenEnv);
+  add(r.memory.embedder.apiKeyEnv);
+  for (const key of [r.memory.observational.model, r.memory.knowledge.model]) add(key ? root.models[key]?.apiKeyEnv : undefined);
+  for (const srv of Object.values(r.mcp.own)) [...envRefs("env" in srv ? srv.env : undefined), ...envRefs("headers" in srv ? srv.headers : undefined)].forEach(add);
+  return [...names].sort();
+}
 
 /** Env variable names the configs point at -> where they are used. Drives the studio's "API keys" panel and the engine's reload of agents whose key changed. */
 export function referencedEnvNames(root: Config, agents: AgentConfig[] = []): Map<string, string[]> {

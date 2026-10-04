@@ -22,17 +22,21 @@ import { Agent, type MastraDBMessage } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
 import { compact, maxBy, pick, pickBy } from "lodash-es";
 import { z } from "zod";
+import { makeChatQueue } from "./chat-queue.ts";
 import { getConfig, reloadConfig, toMastraModel, type Config } from "./config.ts";
+import { syncEnv, valueFingerprint } from "./envfile.ts";
 import type { HomePaths } from "./home.ts";
 import { memoryBlock, readText } from "./instructions.ts";
 import { makeMemory } from "./memory.ts";
 import {
   AGENT_CONFIG_FILE,
   AgentConfigSchema,
+  agentEnvNames,
   agentProblems,
   buildTopology,
   delegationEdges,
   fleetProblems,
+  referencedEnvNames,
   resolveAgent,
   type AgentConfig,
   type AgentEvent,
@@ -41,11 +45,12 @@ import {
   type GetAgentRuntimeResponse,
   type ListAgentsResponse,
   type ResolvedAgent,
+  type TelegramRuntime,
 } from "./schema.ts";
 import { instructionsPath } from "./store.ts";
 import { makeMcp, type Mcp } from "./tools/mcp.ts";
 import { makeWorkspace } from "./tools/workspace.ts";
-import { syncEnv } from "./envfile.ts";
+import { createBot, telegramChannels, type TelegramBot } from "./telegram.ts";
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Scan: pure read of the folder, no side effects                                                    */
@@ -58,7 +63,7 @@ export type ScannedAgent = {
   resolved?: ResolvedAgent;
   instructionsFile?: string;
   problems: string[];
-  /** Hash of resolved settings; instructions text is excluded (it is re-read per turn). */
+  /** Hash of the resolved settings plus a fingerprint of the env values the agent depends on (a rotated key rebuilds it); instructions text is excluded (it is re-read per turn). */
   hash?: string;
 };
 
@@ -67,7 +72,7 @@ export type Scan = { agents: Map<string, ScannedAgent>; fleet: string[] };
 const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 const ignoredDir = (name: string) => name.startsWith(".") || name.startsWith("_");
 
-export function scanAgentDir(dir: string, root: Config): ScannedAgent {
+export function scanAgentDir(dir: string, root: Config, env: NodeJS.ProcessEnv = process.env): ScannedAgent {
   const id = basename(dir);
   const file = join(dir, AGENT_CONFIG_FILE);
   let raw: unknown;
@@ -88,13 +93,15 @@ export function scanAgentDir(dir: string, root: Config): ScannedAgent {
   }
   if (problems.length) return { id, dir, config, problems };
   const resolved = resolveAgent(config, root);
-  return { id, dir, config, resolved, instructionsFile, problems, hash: sha(JSON.stringify(resolved)) };
+  const secrets = agentEnvNames(resolved, root).map((n) => `${n}=${valueFingerprint(env[n])}`);
+  return { id, dir, config, resolved, instructionsFile, problems, hash: sha(JSON.stringify(resolved) + secrets.join(",")) };
 }
 
-export function scanAgents(agentsDir: string, root: Config): Scan {
+export function scanAgents(agentsDir: string, root: Config, env: NodeJS.ProcessEnv = process.env): Scan {
   const agents = new Map<string, ScannedAgent>();
-  const entries = existsSync(agentsDir) ? readdirSync(agentsDir, { withFileTypes: true }) : [];
-  for (const e of entries) if (e.isDirectory() && !ignoredDir(e.name)) agents.set(e.name, scanAgentDir(join(agentsDir, e.name), root));
+  // Sorted, so "the second owner" of a shared bot token is the same agent on every filesystem.
+  const entries = existsSync(agentsDir) ? readdirSync(agentsDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)) : [];
+  for (const e of entries) if (e.isDirectory() && !ignoredDir(e.name)) agents.set(e.name, scanAgentDir(join(agentsDir, e.name), root, env));
 
   const valid = [...agents.values()].flatMap((a) => (a.config && !a.problems.length ? [a.config] : []));
   const cross = fleetProblems(valid, root);
@@ -112,7 +119,13 @@ export function scanAgents(agentsDir: string, root: Config): Scan {
 /* Factory: ResolvedAgent -> Mastra Agent. Injected so tests can stub it.                             */
 /* ------------------------------------------------------------------------------------------------ */
 
-export type BuiltAgent = { agent: Agent; dispose?: () => Promise<void>; mcpErrors?: Record<string, string> };
+export type BuiltAgent = {
+  agent: Agent;
+  dispose?: () => Promise<void>;
+  mcpErrors?: Record<string, string>;
+  /** This agent's own Telegram bot, if it has one. The registry stops it before a replacement is added (one poller per token). */
+  telegram?: TelegramBot;
+};
 export type AgentFactory = (r: ResolvedAgent, scanned: ScannedAgent, deps: FactoryDeps) => Promise<BuiltAgent>;
 export type FactoryDeps = {
   paths: HomePaths;
@@ -120,6 +133,9 @@ export type FactoryDeps = {
   rootMcp: Mcp;
   subAgents: (id: string) => Record<string, Agent>;
   resolved: (id: string) => ResolvedAgent | undefined;
+  env: NodeJS.ProcessEnv;
+  /** The bot token to start this agent's bot with. Undefined: no bot (not enabled, token not set, or another agent holds the same token). */
+  telegramToken?: string;
 };
 
 /**
@@ -156,7 +172,7 @@ export const toolsFromServers = <T,>(tools: Record<string, T>, servers: string[]
   return pickBy(tools, (_t, name) => servers.includes(owner(name) ?? ""));
 };
 
-export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents, resolved }) => {
+export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, root, rootMcp, subAgents, resolved, telegramToken }) => {
   const p = r.sandboxMode === "own" ? ownSandboxPaths(paths, scanned.dir) : paths;
   const cfgFor = (): Config => ({ ...root(), memory: r.memory, limits: { maxSteps: r.maxSteps } });
 
@@ -165,6 +181,15 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
   const ownState = ownMcp ? await ownMcp.load({ ...cfgFor(), mcpServers: r.mcp.own }) : undefined;
 
   const workspace = r.builtinTools.includes("workspace") ? makeWorkspace(p, cfgFor(), undefined, `agent-${r.id}`) : undefined;
+
+  // The bot is only created here (no polling yet); Mastra starts polling when the agent is added to it.
+  const bot = telegramToken ? createBot({ token: telegramToken, allowedUserIds: r.telegram.allowedUserIds }) : undefined;
+  let channels: ReturnType<typeof telegramChannels> | undefined;
+  if (bot) {
+    const queue = makeChatQueue();
+    const { slashHandler } = await import("./commands.ts"); // loaded lazily: it pulls in the consolidation and skills code
+    channels = telegramChannels(bot, { queue, verbose: () => false, slash: slashHandler({ paths, mcp: rootMcp, queue, agentId: r.id, baseModel: () => r.modelKey, restricted: true }) });
+  }
 
   const agent = new Agent({
     id: r.id,
@@ -183,11 +208,16 @@ export const defaultAgentFactory: AgentFactory = async (r, scanned, { paths, roo
     workspace,
     tools: () => ({ ...toolsFromServers(rootMcp.tools(), r.mcp.inherited, rootMcp.state().servers), ...(ownMcp?.tools() ?? {}) }),
     agents: () => subAgents(r.id),
+    ...(channels && { channels }),
   });
 
   return {
     agent,
-    dispose: async () => void (await ownMcp?.close()),
+    telegram: bot,
+    dispose: async () => {
+      await bot?.stop();
+      await ownMcp?.close();
+    },
     mcpErrors: Object.fromEntries(Object.entries(ownState?.errors ?? {}).map(([k, v]) => [`${r.id}/${k}`, v])),
   };
 };
@@ -206,14 +236,22 @@ export type RegistryOptions = {
   factory?: AgentFactory;
   debounceMs?: number;
   log?: (msg: string, extra?: unknown) => void;
+  /** The environment the registry reads secrets from and mirrors ~/.eigen/.env into. Tests pass a plain object. */
+  env?: NodeJS.ProcessEnv;
 };
 
+/** The primary's bot is built at boot from root config (agents/eigen/config.ts), so what it was built with is remembered to tell when a restart is needed. */
+type TrackedBot = { bot: TelegramBot; boot: { tokenEnv: string; allowedUserIds: number[]; tokenFp: string }; off: () => void };
+const sameIds = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 export function createAgentRegistry(opts: RegistryOptions) {
-  const { paths, rootMcp, fsAgentIds = ["eigen"], factory = defaultAgentFactory, debounceMs = 300, log = () => undefined } = opts;
+  const { paths, rootMcp, fsAgentIds = ["eigen"], factory = defaultAgentFactory, debounceMs = 300, log = () => undefined, env = process.env } = opts;
   const events = new EventEmitter<{ event: [AgentEvent] }>();
   const running = new Map<string, Running>();
   const runtime = new Map<string, AgentRuntime>();
   const ownedEnv = new Map<string, string>();
+  const tg = new Map<string, TelegramRuntime>();
+  const tracked = new Map<string, TrackedBot>();
   let scan: Scan = { agents: new Map(), fleet: [] };
   let rootProblem: string | undefined;
   let mastra: Mastra | undefined;
@@ -225,6 +263,55 @@ export function createAgentRegistry(opts: RegistryOptions) {
 
   const emit = (e: AgentEvent) => events.emit("event", e);
   const isFs = (id: string) => fsAgentIds.includes(id);
+
+  /** Runtime as the API reports it: the agent's load status plus its bot's state. */
+  const runtimeOf = (id: string): AgentRuntime | undefined => {
+    const r = runtime.get(id);
+    const t = tg.get(id);
+    return r && t ? { ...r, telegram: t } : r;
+  };
+
+  function setTelegram(id: string, t: TelegramRuntime) {
+    const cur = tg.get(id);
+    if (cur && cur.state === t.state && cur.username === t.username && cur.error === t.error && cur.restartRequired === t.restartRequired) return;
+    tg.set(id, t);
+    emit({ type: "agent.telegram", id, telegram: t });
+    emit({ type: "fleet.changed", rev: String(++rev) }); // topology carries the bot state too
+  }
+
+  const restartNeeded = (t: TrackedBot) => {
+    const root = getConfig().telegram;
+    return root.tokenEnv !== t.boot.tokenEnv || !sameIds(root.allowedUserIds, t.boot.allowedUserIds) || valueFingerprint(env[root.tokenEnv]) !== t.boot.tokenFp;
+  };
+  const withRestart = (id: string, s: TelegramRuntime): TelegramRuntime => {
+    const t = tracked.get(id);
+    const { restartRequired: _drop, ...rest } = s;
+    return t && restartNeeded(t) ? { ...rest, restartRequired: true } : rest;
+  };
+  const refreshTracked = () => {
+    for (const [id, t] of tracked) setTelegram(id, withRestart(id, t.bot.state()));
+  };
+
+  /**
+   * Which agents may not start their bot because another bot already holds the same token VALUE (two env names can hold one token, and a
+   * second poller on a token makes both fail with 409). The primary's bot wins, then the lowest id.
+   */
+  function tokenBlocks(): Map<string, string> {
+    const owner = new Map<string, string>();
+    const blocked = new Map<string, string>();
+    for (const [id, t] of tracked) owner.set(t.boot.tokenFp, id);
+    for (const s of scan.agents.values()) {
+      const r = s.resolved;
+      const name = r?.enabled && !isFs(s.id) && r.telegram.enabled ? r.telegram.tokenEnv : undefined;
+      const value = name ? env[name] : undefined;
+      if (!value) continue;
+      const fp = valueFingerprint(value);
+      const held = owner.get(fp);
+      if (held && held !== s.id) blocked.set(s.id, held);
+      else owner.set(fp, s.id);
+    }
+    return blocked;
+  }
 
   const subAgents = (id: string): Record<string, Agent> => {
     const out: Record<string, Agent> = {};
@@ -241,24 +328,41 @@ export function createAgentRegistry(opts: RegistryOptions) {
     const cur = running.get(id);
     if (!cur) return;
     running.delete(id);
+    // First the bot (no more messages for an agent that is going away), then the agent, then everything else it held.
+    await cur.built?.telegram?.stop().catch((e) => log(`stopping the bot of ${id} failed`, e));
     if (!isFs(id)) mastra?.removeAgent(id);
     await cur.built?.dispose?.().catch((e) => log(`dispose ${id} failed`, e));
+    if (!isFs(id)) tg.delete(id);
     emit({ type: "agent.removed", id });
   }
 
-  async function load(s: ScannedAgent) {
+  async function load(s: ScannedAgent, blockedBy?: string) {
     const resolved = s.resolved!;
     const loadedAt = new Date().toISOString();
     if (isFs(s.id)) {
       running.set(s.id, { hash: s.hash!, resolved, loadedAt });
     } else {
       if (!mastra) return; // not attached yet; the attach() sync will load it
-      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents, resolved: (id) => running.get(id)?.resolved });
+      const tokenName = resolved.telegram.enabled ? resolved.telegram.tokenEnv : undefined;
+      const tokenValue = tokenName ? env[tokenName] : undefined;
+      const built = await factory(resolved, s, { paths, root: getConfig, rootMcp, subAgents, resolved: (id) => running.get(id)?.resolved, env, telegramToken: blockedBy ? undefined : tokenValue });
       const prev = running.get(s.id);
+      // Telegram allows one poller per token and Mastra starts polling as soon as the agent is added, so the old bot must be fully stopped first.
+      await prev?.built?.telegram?.stop().catch((e) => log(`stopping the old bot of ${s.id} failed`, e));
       // Mastra's addAgent throws on an existing key, so swap: remove old, add new, then dispose old resources.
       mastra.removeAgent(s.id);
       mastra.addAgent(built.agent, s.id);
       running.set(s.id, { hash: s.hash!, resolved, built, loadedAt });
+      setTelegram(
+        s.id,
+        built.telegram?.state() ??
+          (!resolved.telegram.enabled
+            ? { state: "off" }
+            : blockedBy
+              ? { state: "error", error: `this bot token is already used by "${blockedBy}"; one token serves one agent` }
+              : { state: "missing-token", error: `${tokenName} is not set in .env` }),
+      );
+      built.telegram?.subscribe((next) => running.get(s.id)?.built === built && setTelegram(s.id, next));
       await prev?.built?.dispose?.().catch((e) => log(`dispose ${s.id} failed`, e));
     }
     runtime.set(s.id, { status: "loaded", problems: [], loadedHash: s.hash, loadedAt, mcpErrors: running.get(s.id)?.built?.mcpErrors });
@@ -278,7 +382,13 @@ export function createAgentRegistry(opts: RegistryOptions) {
     }
     if (reloadRoot) await rootMcp.load(root).catch((e) => log("root MCP reload failed", e));
 
-    scan = scanAgents(paths.agentsDir, root);
+    scan = scanAgents(paths.agentsDir, root, env);
+    const blocked = tokenBlocks();
+    // A blocked bot is part of the agent's version, so the agent restarts its bot when the holder lets go of the token.
+    for (const [id, by] of blocked) {
+      const a = scan.agents.get(id);
+      if (a?.hash) a.hash = sha(`${a.hash}|blocked-by:${by}`);
+    }
 
     for (const id of running.keys()) if (!scan.agents.has(id)) await unload(id);
 
@@ -297,13 +407,14 @@ export function createAgentRegistry(opts: RegistryOptions) {
       }
       if (cur?.hash === s.hash) continue;
       try {
-        await load(s);
+        await load(s, blocked.get(s.id));
       } catch (e) {
         const problems = [`failed to build: ${(e as Error).message}`];
         runtime.set(s.id, { ...(runtime.get(s.id) ?? {}), status: cur ? "stale" : "invalid", problems });
         emit({ type: "agent.error", id: s.id, problems, stale: !!cur });
       }
     }
+    refreshTracked();
     emit({ type: "fleet.changed", rev: String(++rev) });
   }
 
@@ -328,6 +439,14 @@ export function createAgentRegistry(opts: RegistryOptions) {
     }, debounceMs);
   }
 
+  /** ~/.eigen/.env changed: mirror it into the environment; only agents whose own env values changed rebuild (their hash covers them). */
+  function onEnvChange() {
+    const changed = syncEnv(paths, ownedEnv, env);
+    if (!changed.length) return;
+    const rootMcpEnv = new Set([...referencedEnvNames(getConfig())].filter(([, by]) => by.some((u) => u.startsWith("mcpServers."))).map(([n]) => n));
+    onChange(changed.some((n) => rootMcpEnv.has(n))); // a root MCP server that reads the variable must reconnect
+  }
+
   return {
     events,
 
@@ -335,13 +454,33 @@ export function createAgentRegistry(opts: RegistryOptions) {
     attach(m: Mastra): Promise<void> {
       if (mastra === m && attached) return attached;
       mastra = m;
-      syncEnv(paths, ownedEnv);
+      syncEnv(paths, ownedEnv, env);
       return (attached = sync());
     },
 
     /** Initial scan without Mastra (so the fs primary can read its resolved settings at module load). */
     start() {
+      syncEnv(paths, ownedEnv, env);
       return sync();
+    },
+
+    /** Mirror .env into the environment right now (the studio writes a key, then immediately asks for a check). */
+    syncEnvNow: () => void syncEnv(paths, ownedEnv, env),
+
+    /** Env names that hold a Telegram bot token in some config: the only names the token check may read. */
+    telegramEnvNames(): string[] {
+      const names = new Set([getConfig().telegram.tokenEnv]);
+      for (const s of scan.agents.values()) if (s.config?.telegram.tokenEnv) names.add(s.config.telegram.tokenEnv);
+      return [...names];
+    },
+
+    /** The primary's bot (built at boot by agents/eigen/config.ts): report its state like any other, and flag when a change needs a restart. */
+    trackBot(id: string, bot: TelegramBot, boot: { tokenEnv: string; allowedUserIds: number[] }) {
+      tracked.get(id)?.off();
+      const t: TrackedBot = { bot, boot: { ...boot, tokenFp: valueFingerprint(env[boot.tokenEnv]) }, off: () => undefined };
+      tracked.set(id, t);
+      t.off = bot.subscribe((next) => setTelegram(id, withRestart(id, next)));
+      setTelegram(id, withRestart(id, bot.state()));
     },
 
     /** Re-scan now (tests, or after an out-of-band change). `reloadRoot` also re-reads config.json and reconnects root MCP. */
@@ -351,8 +490,13 @@ export function createAgentRegistry(opts: RegistryOptions) {
       if (watchers.length) return;
       // Recursive fs.watch: native on macOS, supported on Linux since Node 20. Rename-replace (atomic writes) fires too.
       watchers.push(watch(paths.agentsDir, { recursive: true }, (_e, f) => f && relevant(f.toString()) && onChange(false)));
-      watchers.push(watch(dirname(paths.configFile), (_e, f) => f?.toString() === basename(paths.configFile) && onChange(true)));
-      watchers.push(watch(dirname(paths.envFile), (_e, f) => f?.toString() === basename(paths.envFile) && syncEnv(paths, ownedEnv) && onChange(false)));
+      watchers.push(
+        watch(dirname(paths.configFile), (_e, f) => {
+          const name = f?.toString();
+          if (name === basename(paths.configFile)) onChange(true);
+          else if (name === basename(paths.envFile)) onEnvChange();
+        }),
+      );
     },
 
     async close() {
@@ -360,6 +504,11 @@ export function createAgentRegistry(opts: RegistryOptions) {
       watchers.splice(0).forEach((w) => w.close());
       await queue;
       for (const id of [...running.keys()]) await unload(id);
+      for (const t of tracked.values()) {
+        t.off();
+        await t.bot.stop().catch((e) => log("stopping the primary bot failed", e));
+      }
+      tracked.clear();
     },
 
     /** Settings for an agent the file router owns (the primary reads its model/maxSteps/etc. from here). */
@@ -372,7 +521,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
       const s = scan.agents.get(id);
       const r = running.get(id)?.resolved;
       if (!s && !r) return undefined;
-      return { id, runtime: runtime.get(id) ?? { status: "invalid", problems: s?.problems ?? [] }, resolved: r ?? s?.resolved ?? null };
+      return { id, runtime: runtimeOf(id) ?? { status: "invalid", problems: s?.problems ?? [] }, resolved: r ?? s?.resolved ?? null };
     },
 
     summaries(): AgentSummary[] {
@@ -388,7 +537,7 @@ export function createAgentRegistry(opts: RegistryOptions) {
           primary: r?.primary ?? c?.primary ?? false,
           modelKey: r?.modelKey ?? c?.model ?? "",
           telegram: r?.telegram ?? { enabled: false, allowedUserIds: [], source: "root" as const },
-          runtime: runtime.get(s.id) ?? { status: "invalid", problems: s.problems },
+          runtime: runtimeOf(s.id) ?? { status: "invalid", problems: s.problems },
         };
       });
     },

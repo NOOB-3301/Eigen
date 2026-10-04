@@ -1,16 +1,14 @@
-import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { agentConfig } from "@mastra/core/agent";
 import { TokenLimiterProcessor } from "@mastra/core/processors";
-import { truncate } from "lodash-es";
 import { delegationContext, toolsFromServers } from "../../lib/agents.ts";
 import { boot } from "../../lib/boot.ts";
-import { restoreActionId, shortenApprovalButtons } from "../../lib/callback-ids.ts";
 import { makeChatQueue } from "../../lib/chat-queue.ts";
 import { slashHandler } from "../../lib/commands.ts";
 import { getConfig, toMastraModel, tokenBudget } from "../../lib/config.ts";
 import { mcp, paths, PRIMARY_ID, registry } from "../../lib/fleet.ts";
 import { mergeSystemProcessor } from "../../lib/merge-system.ts";
 import { orgScopeProcessor } from "../../lib/org-scope.ts";
+import { createBot, telegramChannels } from "../../lib/telegram.ts";
 import { makeScheduleTool } from "../../lib/tools/schedule.ts";
 import { activeModel, readState } from "../../lib/state.ts";
 
@@ -24,13 +22,9 @@ const self = () => registry.resolved(PRIMARY_ID);
 const baseModel = () => self()?.modelKey;
 const model = () => ((cfg) => cfg.models[activeModel(cfg, readState(paths), baseModel())]!)(getConfig());
 
-const telegram = shortenApprovalButtons(createTelegramAdapter({
-  botToken: process.env[config.telegram.tokenEnv],
-  allowedUserIds: config.telegram.allowedUserIds,
-  mode: "polling",
-  // Without this Telegram keeps whatever allowed_updates an earlier getUpdates set, and Approve/Deny taps (callback_query) never arrive.
-  longPolling: { allowedUpdates: ["message", "edited_message", "callback_query"] },
-}));
+// The primary's bot is the root bot, built once at boot (changes to it apply on restart; the registry reports that as `restartRequired`).
+const bot = createBot({ token: process.env[config.telegram.tokenEnv]!, allowedUserIds: config.telegram.allowedUserIds });
+registry.trackBot(PRIMARY_ID, bot, { tokenEnv: config.telegram.tokenEnv, allowedUserIds: config.telegram.allowedUserIds });
 
 export default agentConfig({
   model: () => toMastraModel(model()),
@@ -46,26 +40,9 @@ export default agentConfig({
     if (mastra) await registry.attach(mastra);
     return registry.subAgents(PRIMARY_ID);
   },
-  channels: {
-    adapters: {
-      telegram: {
-        adapter: telegram,
-        streaming: true,
-        // Tool chatter is hidden unless /verbose is on; approval prompts still render as Approve/Deny buttons.
-        toolDisplay: (e) => (e.kind === "running" && readState(paths).verbose ? { kind: "post", message: `🔧 ${e.displayName} ${truncate(e.argsSummary, { length: 120 })}` } : undefined),
-      },
-    },
-    handlers: {
-      // Hand the message to the queue and return, so the adapter keeps polling and /stop works mid-run.
-      onDirectMessage: async (thread, message, run) => queue.push(thread.id, () => run(thread, message)),
-      // Approve/Deny buttons carry a shortened tool-call id (Telegram's 64-byte limit); put the real one back before Mastra looks the call up.
-      onAction: async (event, defaultHandler) => {
-        event.actionId = restoreActionId(event.actionId);
-        return defaultHandler();
-      },
-      onMention: false,
-      onSubscribedMessage: false,
-      onSlashCommand: slashHandler({ paths, mcp, queue, agentId: PRIMARY_ID, baseModel, rescan: () => registry.reload() }),
-    },
-  },
+  channels: telegramChannels(bot, {
+    queue,
+    verbose: () => !!readState(paths).verbose,
+    slash: slashHandler({ paths, mcp, queue, agentId: PRIMARY_ID, baseModel, rescan: () => registry.reload() }),
+  }),
 });

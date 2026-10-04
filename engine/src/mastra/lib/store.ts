@@ -72,7 +72,7 @@ export function readAgent(p: HomePaths, id: string): (RawAgent & { parseError?: 
   return { id, config, instructionsText: path ? readOrNull(path) : null, etag: etagOf(text), ...(parseError && { parseError }) };
 }
 
-/** Everything that must hold before a file is written. Fleet-wide rules (one primary, alias clashes) are reported by the engine, not enforced here, so a swap of primaries can be done in two saves. */
+/** Everything that must hold before a file is written. Fleet-wide rules (one primary, two agents on one bot token) are reported by the engine, not enforced here, so a swap of primaries can be done in two saves. */
 export function validateAgent(p: HomePaths, id: string, config: unknown, root: Config): { issues: string[]; parsed?: AgentConfig } {
   const r = AgentConfigSchema.safeParse(config);
   if (!r.success) return { issues: r.error.issues.map((i) => `${i.path.join(".") || "config"}: ${i.message}`) };

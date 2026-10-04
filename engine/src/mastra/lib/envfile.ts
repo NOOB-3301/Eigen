@@ -5,6 +5,7 @@
  * value back to a caller outside the engine (`parseEnv` is for the engine's own reload). Config files hold only the NAME of a
  * variable, never the secret. Other lines in the file (comments, variables this module does not manage) are left as they are.
  */
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { HomePaths } from "./home.ts";
@@ -12,6 +13,9 @@ import { ENV_NAME, type SecretStatus } from "./schema.ts";
 
 const LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=(.*)$/;
 const MAX_VALUE = 4096;
+
+/** One-way fingerprint of an env value, so "did it change?" can be asked (and hashed into an agent's version) without a value ever being held, logged or sent. */
+export const valueFingerprint = (value: string | undefined) => (value === undefined ? "" : createHash("sha256").update(value).digest("hex").slice(0, 16));
 
 /** dotenv-compatible for what this module writes: bare, 'single quoted' or "double quoted"; later lines win; ` # comment` after a bare value is dropped. */
 export function parseEnv(text: string): Map<string, string> {
