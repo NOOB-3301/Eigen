@@ -215,7 +215,7 @@ function StudioInner({ initialEngine }: { initialEngine: "online" | "offline" })
             {CABLES.map((c) => (
               <li key={c.kind} className="flex items-center gap-2.5 text-[12px] text-ink-2">
                 <svg width="28" height="6" aria-hidden>
-                  <line x1="1" y1="3" x2="27" y2="3" stroke={`var(--cable-${c.kind})`} strokeWidth="2" strokeLinecap="round" strokeDasharray={c.kind === "alias" ? "4 4" : undefined} />
+                  <line x1="1" y1="3" x2="27" y2="3" stroke={`var(--cable-${c.kind})`} strokeWidth="2" strokeLinecap="round" />
                 </svg>
                 {c.label}
               </li>

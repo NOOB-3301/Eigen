@@ -107,7 +107,7 @@ function Flow({ fleet, savedLayout, selectedId, onSelect, occludedRight, drawerW
           type: "cable",
           selectable: false,
           focusable: false,
-          data: { kind: e.type, label: e.label && e.type === "alias" ? e.label : e.type === "routes" ? "default" : undefined, dim: !!selNode && !touches, hot: !!touches },
+          data: { kind: e.type, label: e.label, dim: !!selNode && !touches, hot: !!touches },
         };
       }),
     [fleet.topology.edges, selNode],

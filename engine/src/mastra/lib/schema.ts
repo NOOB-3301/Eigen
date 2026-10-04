@@ -269,7 +269,8 @@ export type AgentStatus = "loaded" | "stale" | "invalid" | "disabled" | "offline
  * error:         token rejected by Telegram, or another poller holds it (409); `error` says which.
  */
 export type TelegramState = "off" | "missing-token" | "starting" | "polling" | "error";
-export type TelegramRuntime = { state: TelegramState; username?: string; error?: string };
+/** `restartRequired`: the primary's bot is built once at boot, so a change to its root token / allow-list applies only after an engine restart. */
+export type TelegramRuntime = { state: TelegramState; username?: string; error?: string; restartRequired?: boolean };
 
 export type AgentRuntime = {
   status: AgentStatus;
@@ -357,7 +358,17 @@ export type AgentEvent =
   | { type: "agent.loaded"; id: string; hash: string }
   | { type: "agent.removed"; id: string }
   | { type: "agent.error"; id: string; problems: string[]; stale: boolean }
-  | { type: "fleet.changed"; rev: string };
+  | { type: "fleet.changed"; rev: string }
+  /** A bot started, stopped, failed, or learned its @username. Sent for the primary too. */
+  | { type: "agent.telegram"; id: string; telegram: TelegramRuntime };
+
+/** Engine POST /eigen/telegram/check, studio POST /api/telegram/check: calls getMe with the token in that env var. Never returns the token. */
+export const TelegramCheckRequest = z.object({ tokenEnv: z.string().regex(ENV_NAME) });
+export type TelegramCheckRequest = z.infer<typeof TelegramCheckRequest>;
+export type TelegramCheckResponse = { ok: boolean; username?: string; error?: string };
+
+/** Engine POST /eigen/models/:key/test, studio POST /api/models/:key/test: one tiny prompt to that root model, 20s timeout. Errors are redacted. */
+export type ModelTestResponse = { ok: boolean; ms: number; reply?: string; error?: string };
 
 /* ------------------------------------------------------------------------------------------------ */
 /* Topology (React Flow). Positions are NOT here: they live in data/topology-layout.json.            */

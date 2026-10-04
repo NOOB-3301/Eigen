@@ -102,7 +102,7 @@ export function NewAgentDialog({ open, onClose, fleet, root, onCreated }: { open
           <L label="Name" error={err("name")}>
             {(a) => <input {...a} autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Researcher" className={inputCls(!!a["aria-invalid"])} />}
           </L>
-          <L label="Id" error={effectiveId ? err("id") : undefined} hint="Folder name and @alias.">
+          <L label="Id" error={effectiveId ? err("id") : undefined} hint="Folder name; can't be changed later.">
             {(a) => (
               <input
                 {...a}

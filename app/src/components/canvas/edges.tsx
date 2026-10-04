@@ -10,14 +10,12 @@ export type CableEdge = Edge<CableData, "cable">;
 
 const COLOR: Record<TopologyEdge["type"], string> = {
   routes: "var(--cable-routes)",
-  alias: "var(--cable-alias)",
   delegates: "var(--cable-delegates)",
   uses: "var(--cable-uses)",
 };
 
 export const CABLES: Array<{ kind: TopologyEdge["type"]; label: string }> = [
-  { kind: "routes", label: "Telegram default" },
-  { kind: "alias", label: "Telegram @alias" },
+  { kind: "routes", label: "Telegram bot" },
   { kind: "delegates", label: "Can delegate to" },
   { kind: "uses", label: "Uses tool server" },
 ];
@@ -26,8 +24,7 @@ export const CABLES: Array<{ kind: TopologyEdge["type"]; label: string }> = [
 export const Cable = memo(function Cable({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<CableEdge>) {
   const kind = data?.kind ?? "uses";
   const [path, mx, my] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 });
-  // Alias labels sit next to the agent they route to (several share the Telegram source, so midpoints collide).
-  const [lx, ly] = kind === "alias" ? [targetX - 44, targetY - 12] : [mx, my];
+  const [lx, ly] = [mx, my];
   const color = COLOR[kind];
   const opacity = data?.dim ? 0.18 : 1;
   return (
@@ -40,7 +37,6 @@ export const Cable = memo(function Cable({ id, sourceX, sourceY, targetX, target
             stroke: color,
             strokeWidth: data?.hot ? 2.4 : kind === "uses" ? 1.4 : 1.8,
             strokeOpacity: kind === "uses" ? 0.7 : 0.85,
-            strokeDasharray: kind === "alias" ? "5 5" : undefined,
           }}
         />
         {kind === "delegates" && <path d={path} className="cable-signal" style={{ stroke: color, strokeWidth: 3.2, strokeLinecap: "round", fill: "none" }} />}

@@ -69,7 +69,7 @@ function summaryOf(s: Scanned, root: Config): AgentSummary {
     enabled: c?.enabled ?? s.raw.enabled !== false,
     primary: r?.primary ?? c?.primary ?? s.raw.primary === true,
     modelKey: r?.modelKey ?? c?.model ?? str(s.raw.model, root.defaultModel),
-    aliases: r?.aliases ?? [],
+    telegram: r?.telegram ?? { enabled: false, allowedUserIds: [], source: "root" },
     runtime: { status: "offline", problems: s.problems.map(scrubPaths) },
   };
 }

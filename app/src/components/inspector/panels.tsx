@@ -24,7 +24,6 @@ export function OverviewPanel({ id, root, agents }: PanelProps) {
   const primary = getPath(config, "primary") === true;
   const acceptsFrom = (getPath(config, "delegation.acceptsFrom") as string | undefined) ?? "primary";
   const canDelegateTo = (getPath(config, "delegation.canDelegateTo") as string[] | undefined) ?? [];
-  const aliases = getPath(config, "telegram.aliases") as string[] | undefined;
   const others = agents.filter((a) => a.id !== id);
   const defaultModel = root?.models.find((m) => m.key === root.defaultModel);
 
@@ -105,57 +104,7 @@ export function OverviewPanel({ id, root, agents }: PanelProps) {
         </Field>
       </Section>
 
-      <Section title="Telegram">
-        <AliasField id={id} aliases={aliases} primary={primary} />
-      </Section>
     </>
-  );
-}
-
-function AliasField({ id, aliases, primary }: { id: string; aliases?: string[]; primary: boolean }) {
-  const { set } = useForm();
-  const joined = (aliases ?? []).join(", ");
-  const [text, setText] = useState(joined);
-  // Re-sync when the draft changes from elsewhere (JSON tab, reload theirs), without clobbering what is being typed.
-  const [prevJoined, setPrevJoined] = useState(joined);
-  if (joined !== prevJoined) {
-    setPrevJoined(joined);
-    if (text.split(",").map((x) => x.trim().replace(/^@/, "")).filter(Boolean).join(", ") !== joined) setText(joined);
-  }
-  return (
-    <Field
-      label="Aliases"
-      path="telegram.aliases"
-      hint={primary ? "The primary answers every message that has no alias." : `Messages starting with @alias go straight to this agent.`}
-      aside={
-        <Provenance overridden={aliases !== undefined} inheritedLabel={`@${id}`} onOverride={() => set("telegram.aliases", [id])} onReset={() => set("telegram.aliases", undefined)} />
-      }
-    >
-      {({ id: fid, describedBy, invalid }) =>
-        aliases === undefined ? (
-          <div className="font-mono text-[13px] text-ink-3">@{id}</div>
-        ) : (
-          <input
-            id={fid}
-            aria-describedby={describedBy}
-            aria-invalid={invalid}
-            value={text}
-            placeholder="research, r"
-            onChange={(e) => {
-              setText(e.target.value);
-              set(
-                "telegram.aliases",
-                e.target.value
-                  .split(",")
-                  .map((s) => s.trim().replace(/^@/, ""))
-                  .filter(Boolean),
-              );
-            }}
-            className={cn(inputCls(invalid), "font-mono text-[13px]")}
-          />
-        )
-      }
-    </Field>
   );
 }
 
