@@ -22,7 +22,6 @@ async function setup() {
   const cfg = parseConfig({
     ...example,
     models: { local: { id: "fake/model", url: llm.url } },
-    curatorModel: undefined,
     memory: { lastMessages: 1, semanticRecall: { topK: 1, messageRange: 1 }, embedder: { id: "fake/embed", url: llm.url } },
   });
   const agent = new Agent({ id: "t", name: "t", instructions: "test", model: toMastraModel(cfg.models.local!), memory: makeMemory(p, cfg) });

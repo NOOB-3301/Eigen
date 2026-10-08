@@ -28,7 +28,6 @@ export async function startEigen(turns: Turn[], config: Record<string, unknown> 
   Object.assign(cfg, { telegram: { ...cfg.telegram, allowedUserIds: [7] }, sandbox: { ...cfg.sandbox, isolation: "none" }, ...config });
   for (const m of Object.values<any>(cfg.models)) m.url = llm.url;
   cfg.memory.embedder.url = llm.url;
-  cfg.curatorModel = "local";
   writeFileSync(p.configFile, JSON.stringify(cfg));
 
   const env = { ...process.env, EIGEN_HOME: p.home, EIGEN_PORT: String(port), TELEGRAM_API_BASE_URL: tg.url };

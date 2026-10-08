@@ -29,7 +29,6 @@ export const ConfigSchema = z
   .object({
     defaultModel: z.string().min(1),
     models: z.record(z.string(), Model),
-    curatorModel: z.string().optional(),
     timezone: z.string().default(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
     telegram: z.object({
       tokenEnv: z.string().default("TELEGRAM_BOT_TOKEN"),
@@ -54,7 +53,6 @@ export const ConfigSchema = z
           .object({ enabled: z.boolean().default(true), topK: posInt.default(4), messageRange: posInt.default(2) })
           .prefault({}),
         embedder: Model.pick({ id: true, url: true, apiKeyEnv: true }).prefault({ id: "ollama/nomic-embed-text", url: "http://localhost:11434/v1" }),
-        consolidationCron: z.string().default("30 3 * * *"),
         /** Mastra Observational Memory: background Observer/Reflector agents compress old turns into observations. Off until enabled. */
         observational: z
           .object({
@@ -84,7 +82,6 @@ export const ConfigSchema = z
     mcp: z.object({ enabled: z.boolean().default(true), startupTimeoutMs: posInt.default(20_000) }).prefault({}),
   })
   .refine((c) => c.defaultModel in c.models, { path: ["defaultModel"], message: "must name an entry in models" })
-  .refine((c) => !c.curatorModel || c.curatorModel in c.models, { path: ["curatorModel"], message: "must name an entry in models" })
   .refine((c) => !c.memory.observational.model || c.memory.observational.model in c.models, { path: ["memory", "observational", "model"], message: "must name an entry in models" })
   .refine((c) => !c.memory.knowledge.model || c.memory.knowledge.model in c.models, { path: ["memory", "knowledge", "model"], message: "must name an entry in models" })
   .refine((c) => !c.memory.knowledge.enabled || c.memory.observational.enabled, { path: ["memory", "knowledge", "enabled"], message: "needs memory.observational.enabled" })

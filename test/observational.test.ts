@@ -13,7 +13,6 @@ const cfgWith = (memory: Record<string, unknown> = {}, rest: Record<string, unkn
     ...example,
     models: { local: { id: "ollama/x", url: "http://localhost:11434/v1" }, cloud: { id: "anthropic/claude-sonnet-5-5" }, small: { id: "ollama-cloud/gpt-oss:20b" } },
     defaultModel: "local",
-    curatorModel: "cloud",
     ...rest,
     memory: { ...example.memory, ...memory },
   });
@@ -48,11 +47,10 @@ describe("observationalOptions", () => {
     expect(observationalOptions(() => cfgWith({ observational: { enabled: true, retrieval: false } }))!.retrieval).toBe(false);
   });
 
-  it("picks the observer model from observational.model, then curatorModel, then defaultModel, and follows /reload", () => {
+  it("picks the observer model from observational.model, then defaultModel, and follows /reload", () => {
     const pick = (memory: Record<string, unknown>, rest: Record<string, unknown> = {}) => (observationalOptions(() => cfgWith(memory, rest))!.model as () => unknown)();
     expect(pick({ observational: { enabled: true, model: "small" } })).toBe("ollama-cloud/gpt-oss:20b");
-    expect(pick({ observational: { enabled: true } })).toBe("anthropic/claude-sonnet-5-5");
-    expect(pick({ observational: { enabled: true } }, { curatorModel: undefined })).toMatchObject({ id: "ollama/x" });
+    expect(pick({ observational: { enabled: true } })).toMatchObject({ id: "ollama/x" });
 
     let live = cfgWith({ observational: { enabled: true, model: "small" } });
     const o = observationalOptions(() => live)!;

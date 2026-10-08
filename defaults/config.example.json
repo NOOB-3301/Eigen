@@ -11,7 +11,6 @@
       "id": "anthropic/claude-sonnet-5-5"
     }
   },
-  "curatorModel": "cloud",
   "telegram": {
     "tokenEnv": "TELEGRAM_BOT_TOKEN",
     "allowedUserIds": []
@@ -28,7 +27,6 @@
     "lastMessages": 20,
     "semanticRecall": { "enabled": true, "topK": 4, "messageRange": 2 },
     "embedder": { "id": "ollama/nomic-embed-text", "url": "http://localhost:11434/v1" },
-    "consolidationCron": "30 3 * * *",
     "observational": { "enabled": false, "messageTokens": 8000, "reflectionTokens": 20000, "activateAfterIdle": "30m", "retrieval": true },
     "knowledge": { "enabled": false, "pins": true, "tools": true, "maxPins": 20, "maxCharacters": 2000 }
   },

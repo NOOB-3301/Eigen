@@ -17,7 +17,6 @@ describe("config", () => {
   it("rejects bad model ids and dangling model references", () => {
     expect(() => parseConfig({ ...example(), models: { local: { id: "nope" } } })).toThrow(/provider\/model/);
     expect(() => parseConfig({ ...example(), defaultModel: "ghost" })).toThrow(/models/);
-    expect(() => parseConfig({ ...example(), curatorModel: "ghost" })).toThrow(/models/);
   });
 
   it("names the fix when config.json is missing", () => {

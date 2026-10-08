@@ -98,11 +98,6 @@ describe("slash commands (built server, fake Telegram, fake model)", () => {
     await say("hello", "hi");
     expect(JSON.stringify(eigen.llm.requests[0])).toContain("clawhub");
   });
-
-  it("/consolidate says so when there is nothing new", async () => {
-    eigen = await startEigen([{ text: "x" }]);
-    await say("/consolidate", "Nothing new to add.");
-  });
 });
 
 describe("MCP over Telegram", () => {

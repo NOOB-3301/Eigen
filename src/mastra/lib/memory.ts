@@ -59,7 +59,7 @@ export function observationalOptions(getCfg: () => Config) {
   if (!om.enabled) return undefined;
   const model = () => {
     const c = getCfg();
-    return toMastraModel(c.models[c.memory.observational.model ?? c.curatorModel ?? c.defaultModel]!);
+    return toMastraModel(c.models[c.memory.observational.model ?? c.defaultModel]!);
   };
   const knowledgeModel = () => {
     const c = getCfg();

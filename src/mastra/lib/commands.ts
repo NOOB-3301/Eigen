@@ -3,7 +3,6 @@ import type { Mastra } from "@mastra/core/mastra";
 import type { LocalSandbox } from "@mastra/core/workspace";
 import { compact, map, size, toPairs } from "lodash-es";
 import { getConfig, reloadConfig } from "./config.ts";
-import { lastRunAt, runConsolidation } from "./consolidate.ts";
 import type { HomePaths } from "./home.ts";
 import type { ChatQueue } from "./chat-queue.ts";
 import type { Mcp, McpState } from "./tools/mcp.ts";
@@ -12,7 +11,6 @@ import { secretsHidden } from "./sandbox.ts";
 import { refreshSkillEnv } from "./sandbox.ts";
 import { reconcileSkills } from "./skills.ts";
 import { activeModel, patchState, readState } from "./state.ts";
-import { dayjs } from "./time.ts";
 
 export type Deps = { paths: HomePaths; mcp: Mcp; queue: ChatQueue; agentId: string };
 type Ctx = Deps & { mastra: Mastra; args: string; chatId: string };
@@ -44,7 +42,6 @@ const COMMANDS: Record<string, Command> = {
       const { paths, mastra, agentId } = c;
       const cfg = getConfig();
       const name = activeModel(cfg, readState(paths));
-      const last = lastRunAt(paths);
       const workspace = await mastra.getAgent(agentId).getWorkspace();
       const skills = await workspace?.skills?.list();
       const sandbox = workspace?.sandbox as LocalSandbox | undefined;
@@ -55,7 +52,6 @@ const COMMANDS: Record<string, Command> = {
         `Skills installed: ${size(skills)}`,
         mcpLine(c.mcp.state()),
         `Reminders: ${size(await listReminders(mastra.schedules, agentId))}`,
-        `Memory notes updated: ${last.getTime() ? dayjs(last).tz(cfg.timezone).format("ddd D MMM HH:mm") : "never"}`,
         readState(paths).verbose && "Verbose: on",
       );
     },
@@ -109,13 +105,6 @@ const COMMANDS: Record<string, Command> = {
       const on = /^(on|true|1)$/i.test(args.trim()) || (!args.trim() && !readState(paths).verbose);
       patchState(paths, { verbose: on });
       return `Verbose ${on ? "on" : "off"}.`;
-    },
-  },
-  consolidate: {
-    help: "fold recent chats into the memory notes now",
-    run: async ({ mastra }) => {
-      const r = await runConsolidation(mastra);
-      return { nothing: "Nothing new to add.", updated: `Memory notes updated (${r.chunks} batch${r.chunks === 1 ? "" : "es"}).`, rejected: "The update was rejected; nothing changed." }[r.status];
     },
   },
 };
