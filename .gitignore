@@ -6,3 +6,4 @@ node_modules/
 .env.*
 !defaults/env.example
 .vitest/
+app/.next
